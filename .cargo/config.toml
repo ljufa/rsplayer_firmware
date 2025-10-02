@@ -1,5 +1,7 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-# runner = "elf2uf2-rs --deploy --serial --verbose"
+### Flash over usb without external programmer ###
+# runner = "picotool load --update --verify --execute -t elf"
+### Flash over SWD with probe-rs ###
 runner = "probe-rs run --chip RP2040"
 
 [build]
