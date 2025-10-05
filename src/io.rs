@@ -56,6 +56,14 @@ pub mod uart {
                                 }
                             }
                         }
+                        else if received_str.starts_with("QueryCurVolume") {
+                            control.send(Command::QueryCurrentVolume).await;
+                        }
+                        else if received_str == "VolUp" {
+                            control.send(Command::VolumeUp).await;
+                        } else if received_str == "VolDown" {
+                            control.send(Command::VolumeDown).await;
+                        }
                     }
                 }
                 Err(_) => {
@@ -64,6 +72,8 @@ pub mod uart {
             }
         }
     }
+  
+    
 }
 
 pub mod ir {
@@ -157,6 +167,12 @@ pub mod ir {
                     51 => {
                         if !cmd.repeat {
                             control.send(Command::ToggleDacDsdDclksClock).await
+                        }
+                    }
+                    // VOL+ button
+                    78 => {
+                        if !cmd.repeat {
+                            control.send(Command::ToggleRandomPlay).await
                         }
                     }
 

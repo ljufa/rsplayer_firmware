@@ -1,8 +1,11 @@
-use defmt::{debug, error};
+use core::fmt::Write;
+use defmt::{debug, error, info};
 use embassy_rp::{
     peripherals::UART0,
     uart::{Async, UartTx},
 };
+
+use crate::fmtbuf::FmtBuf;
 
 pub struct RsPlayer {
     uart: UartTx<'static, UART0, Async>,
@@ -26,4 +29,12 @@ impl RsPlayer {
         debug!("Sending command: {:?}", cmd_bytes);
         self.uart.blocking_write(&cmd_bytes).unwrap();
     }
+
+    pub fn send_current_volume(&mut self, vol: u8) {
+        let buff = &mut FmtBuf::new();
+        _ = write!(buff, "CurVolume={}", vol);
+        info!("Sending command: {}", buff.as_str());
+        self.send_command(buff.as_str());
+    }
+    
 }

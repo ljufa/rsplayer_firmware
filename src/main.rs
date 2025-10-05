@@ -1,12 +1,14 @@
 #![no_std]
 #![no_main]
 #![allow(async_fn_in_trait)]
+use core::fmt::Write;
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering::SeqCst;
 
 use assign_resources::assign_resources;
 use dac::Dac;
-use defmt::*;
+use defmt::unwrap;
+use defmt::{debug, info};
 use display::OledDisplay;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{self, I2C1, UART0};
@@ -19,21 +21,23 @@ use embassy_time::{block_for, Duration, Timer};
 
 use embassy_executor::Executor;
 
+use crate::fmtbuf::FmtBuf;
 use embassy_rp::multicore::{spawn_core1, Stack};
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
 use embassy_sync::channel::Channel;
 use heapless::String;
 use static_cell::StaticCell;
-use {defmt_rtt as _, panic_probe as _};
+
 use embassy_rp::peripherals::PIO0;
+use {defmt_rtt as _, panic_probe as _};
 mod dac;
 mod display;
 
 mod flash;
+mod fmtbuf;
 mod i2c_helper;
 mod io;
 mod rsplayer;
-
 bind_interrupts!(struct IrqsI2c {
     I2C1_IRQ => embassy_rp::i2c::InterruptHandler<I2C1>;
 });
@@ -99,6 +103,8 @@ enum Command {
     ToggleDacDsdDclkPolarity,
     ToggleDacDsdCutoffFreqFilter,
     ToggleDacDsdDclksClock,
+    QueryCurrentVolume,
+    ToggleRandomPlay
 }
 
 static CMD_CHANNEL: Channel<ThreadModeRawMutex, Command, 64> = Channel::new();
@@ -138,14 +144,18 @@ fn main() -> ! {
 
     let flash = flash::Storage::new(res.flash);
 
-
     let Pio {
-        mut common, sm0,  ..
+        mut common, sm0, ..
     } = Pio::new(php.PIO0, IrqsPio);
 
     let prg = PioEncoderProgram::new(&mut common);
-    let encoder: PioEncoder<'_, PIO0, 0> = PioEncoder::new(&mut common, sm0, res.rotary.pin16_a, res.rotary.pin17_b, &prg);
-
+    let encoder: PioEncoder<'_, PIO0, 0> = PioEncoder::new(
+        &mut common,
+        sm0,
+        res.rotary.pin16_a,
+        res.rotary.pin17_b,
+        &prg,
+    );
 
     // start command processing on core1
     spawn_core1(
@@ -158,7 +168,10 @@ fn main() -> ! {
                     CMD_CHANNEL.sender(),
                     uart_rx
                 )));
-                unwrap!(spawner.spawn(io::rotary::listen_rotary_encoder(CMD_CHANNEL.sender(), encoder)));
+                unwrap!(spawner.spawn(io::rotary::listen_rotary_encoder(
+                    CMD_CHANNEL.sender(),
+                    encoder
+                )));
                 unwrap!(spawner.spawn(io::rotary::listen_rotary_encoder_button(
                     CMD_CHANNEL.sender(),
                     res.rotary.pin21_sw
@@ -276,18 +289,25 @@ pub async fn process_commands(
                 let new_val = dac.volume_up().await;
                 flash.save_volume(new_val);
                 disp.draw_volume(new_val, &mut buff);
+                rsplayer.send_current_volume(new_val);
             }
             Command::VolumeDown => {
                 info!("got VolumeDown");
                 let new_val = dac.volume_down().await;
                 flash.save_volume(new_val);
                 disp.draw_volume(new_val, &mut buff);
+                rsplayer.send_current_volume(new_val);
             }
             Command::SetVolume(vol) => {
                 info!("Received SetVolume({})", vol);
                 dac.set_volume(vol).await;
                 flash.save_volume(vol);
                 disp.draw_volume(vol, &mut buff);
+                rsplayer.send_current_volume(vol);
+            }
+            Command::ToggleRandomPlay => {
+                info!("got ToggleRandomPlay");
+                rsplayer.send_command("RandomToggle");
             }
             Command::ToggleInput => {
                 // select optical or coaxial input
@@ -339,6 +359,10 @@ pub async fn process_commands(
             Command::ToggleDacDsdDclksClock => {
                 info!("got ToggleDacDsdDclksClock");
                 dac.toggle_dsd_dcks_clock().await;
+            }
+            Command::QueryCurrentVolume => {
+                let vol = flash.load_volume();
+                rsplayer.send_current_volume(vol);
             }
         }
     }
