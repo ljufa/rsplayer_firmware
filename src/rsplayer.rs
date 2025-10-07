@@ -1,17 +1,14 @@
 use core::fmt::Write;
 use defmt::{debug, error, info};
-use embassy_rp::{
-    peripherals::UART0,
-    uart::{Async, UartTx},
-};
+use embassy_rp::uart::{Async, UartTx};
 
 use crate::fmtbuf::FmtBuf;
 
 pub struct RsPlayer {
-    uart: UartTx<'static, UART0, Async>,
+    uart: UartTx<'static, Async>,
 }
 impl RsPlayer {
-    pub fn new(uart: UartTx<'static, UART0, Async>) -> Self {
+    pub fn new(uart: UartTx<'static, Async>) -> Self {
         RsPlayer { uart }
     }
     pub fn send_command(&mut self, cmd: &str) {
@@ -36,5 +33,4 @@ impl RsPlayer {
         info!("Sending command: {}", buff.as_str());
         self.send_command(buff.as_str());
     }
-    
 }

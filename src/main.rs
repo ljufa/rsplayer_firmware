@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 #![allow(async_fn_in_trait)]
-use core::fmt::Write;
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering::SeqCst;
 
@@ -11,20 +10,23 @@ use defmt::unwrap;
 use defmt::{debug, info};
 use display::OledDisplay;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{self, I2C1, UART0};
+use embassy_rp::peripherals::{self, I2C1, UART0, USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::rotary_encoder::{PioEncoder, PioEncoderProgram};
 use embassy_rp::uart::Uart;
+use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_rp::{bind_interrupts, uart};
 use embassy_sync::mutex::Mutex;
 use embassy_time::{block_for, Duration, Timer};
 
 use embassy_executor::Executor;
 
-use crate::fmtbuf::FmtBuf;
 use embassy_rp::multicore::{spawn_core1, Stack};
+use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
 use embassy_sync::channel::Channel;
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embassy_usb::UsbDevice;
 use heapless::String;
 use static_cell::StaticCell;
 
@@ -38,15 +40,20 @@ mod fmtbuf;
 mod i2c_helper;
 mod io;
 mod rsplayer;
+mod usb;
+mod ir;
+mod uart_serial;
 bind_interrupts!(struct IrqsI2c {
     I2C1_IRQ => embassy_rp::i2c::InterruptHandler<I2C1>;
 });
-
 bind_interrupts!(struct IrqsUart {
     UART0_IRQ => embassy_rp::uart::InterruptHandler<UART0>;
 });
 bind_interrupts!(struct IrqsPio {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
+});
+bind_interrupts!(struct IrqsUsb {
+    USBCTRL_IRQ => InterruptHandler<USB>;
 });
 
 assign_resources! {
@@ -104,7 +111,7 @@ enum Command {
     ToggleDacDsdCutoffFreqFilter,
     ToggleDacDsdDclksClock,
     QueryCurrentVolume,
-    ToggleRandomPlay
+    ToggleRandomPlay,
 }
 
 static CMD_CHANNEL: Channel<ThreadModeRawMutex, Command, 64> = Channel::new();
@@ -157,6 +164,49 @@ fn main() -> ! {
         &prg,
     );
 
+    // USB
+    // Create the driver, from the HAL.
+    let usb_driver = Driver::new(php.USB, IrqsUsb);
+
+    // Create embassy-usb Config
+    let usb_config = {
+        let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
+        config.manufacturer = Some("Embassy");
+        config.product = Some("USB-serial example");
+        config.serial_number = Some("12345678");
+        config.max_power = 100;
+        config.max_packet_size_0 = 64;
+        config
+    };
+
+    // Create embassy-usb DeviceBuilder using the driver and config.
+    // It needs some buffers for building the descriptors.
+    let mut usb_builder = {
+        static CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
+        static BOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
+        static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
+
+        let builder = embassy_usb::Builder::new(
+            usb_driver,
+            usb_config,
+            CONFIG_DESCRIPTOR.init([0; 256]),
+            BOS_DESCRIPTOR.init([0; 256]),
+            &mut [], // no msos descriptors
+            CONTROL_BUF.init([0; 64]),
+        );
+        builder
+    };
+
+    // Create classes on the builder.
+    let usb_class: CdcAcmClass<'_, Driver<'_, USB>> = {
+        static STATE: StaticCell<State> = StaticCell::new();
+        let state = STATE.init(State::new());
+        CdcAcmClass::new(&mut usb_builder, state, 64)
+    };
+
+    // Build the builder.
+    let usb_device = usb_builder.build();
+
     // start command processing on core1
     spawn_core1(
         php.CORE1,
@@ -164,7 +214,7 @@ fn main() -> ! {
         move || {
             let executor1 = EXECUTOR1.init(Executor::new());
             executor1.run(|spawner| {
-                unwrap!(spawner.spawn(io::uart::listen_uart_commands(
+                unwrap!(spawner.spawn(uart_serial::listen_uart_commands(
                     CMD_CHANNEL.sender(),
                     uart_rx
                 )));
@@ -176,7 +226,7 @@ fn main() -> ! {
                     CMD_CHANNEL.sender(),
                     res.rotary.pin21_sw
                 )));
-                unwrap!(spawner.spawn(io::ir::listen_ir_receiver(CMD_CHANNEL.sender(), php.PIN_3)));
+                unwrap!(spawner.spawn(ir::listen_ir_receiver(CMD_CHANNEL.sender(), php.PIN_3)));
             });
         },
     );
@@ -185,8 +235,18 @@ fn main() -> ! {
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
         unwrap!(spawner.spawn(dim_display()));
-        unwrap!(spawner.spawn(process_commands(dac, rsplayer, res.out, res.display, flash)))
+        unwrap!(spawner.spawn(process_commands(dac, rsplayer, res.out, res.display, flash)));
+        unwrap!(spawner.spawn(usb_task(usb_device)));
+        unwrap!(spawner.spawn(usb::listen_usb_commands(CMD_CHANNEL.sender(), usb_class)));
     });
+}
+
+type MyUsbDriver = Driver<'static, USB>;
+type MyUsbDevice = UsbDevice<'static, MyUsbDriver>;
+
+#[embassy_executor::task]
+async fn usb_task(mut usb: MyUsbDevice) {
+    usb.run().await
 }
 
 #[embassy_executor::task]
