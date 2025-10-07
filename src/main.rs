@@ -177,7 +177,6 @@ fn main() -> ! {
                     res.rotary.pin21_sw
                 )));
                 unwrap!(spawner.spawn(io::ir::listen_ir_receiver(CMD_CHANNEL.sender(), php.PIN_3)));
-                unwrap!(spawner.spawn(dim_display()));
             });
         },
     );
@@ -185,6 +184,7 @@ fn main() -> ! {
     // receive commands on core0
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
+        unwrap!(spawner.spawn(dim_display()));
         unwrap!(spawner.spawn(process_commands(dac, rsplayer, res.out, res.display, flash)))
     });
 }

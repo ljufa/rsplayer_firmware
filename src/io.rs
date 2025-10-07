@@ -191,7 +191,7 @@ pub mod rotary {
         peripherals::{PIN_21, PIO0},
         pio_programs::rotary_encoder::{Direction, PioEncoder},
     };
-    use embassy_time::{with_deadline, Duration, Timer};
+    use embassy_time::{with_deadline, with_timeout, Duration, Timer};
 
     #[embassy_executor::task]
     pub async fn listen_rotary_encoder(
@@ -235,7 +235,7 @@ pub mod rotary {
                 }
                 // button held for > >5s
                 Err(_) => {
-                    info!("Button Long Held");
+                    info!("Button Long Held");  
                     control.send(Command::TogglePower).await;
                 }
             }
@@ -258,7 +258,12 @@ pub mod rotary {
             loop {
                 let l1 = self.input.get_level();
 
-                self.input.wait_for_any_edge().await;
+                if with_timeout(Duration::from_millis(100), self.input.wait_for_any_edge())
+                    .await
+                    .is_err()
+                {
+                    continue;
+                };
 
                 Timer::after(self.debounce).await;
 
