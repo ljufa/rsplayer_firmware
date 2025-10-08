@@ -10,12 +10,12 @@ use defmt::unwrap;
 use defmt::{debug, info};
 use display::OledDisplay;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{self, I2C1, UART0, USB};
+use embassy_rp::peripherals::{self, I2C1,  USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::rotary_encoder::{PioEncoder, PioEncoderProgram};
-use embassy_rp::uart::Uart;
+
 use embassy_rp::usb::{Driver, InterruptHandler};
-use embassy_rp::{bind_interrupts, uart};
+use embassy_rp::{bind_interrupts};
 use embassy_sync::mutex::Mutex;
 use embassy_time::{block_for, Duration, Timer};
 
@@ -42,12 +42,9 @@ mod io;
 mod rsplayer;
 mod usb;
 mod ir;
-mod uart_serial;
+
 bind_interrupts!(struct IrqsI2c {
     I2C1_IRQ => embassy_rp::i2c::InterruptHandler<I2C1>;
-});
-bind_interrupts!(struct IrqsUart {
-    UART0_IRQ => embassy_rp::uart::InterruptHandler<UART0>;
 });
 bind_interrupts!(struct IrqsPio {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
@@ -130,24 +127,8 @@ fn main() -> ! {
     // https://github.com/knurling-rs/defmt/pull/683
     block_for(Duration::from_millis(50));
 
-    let mut config = uart::Config::default();
-    config.baudrate = 115200;
-
-    let uart = Uart::new(
-        php.UART0,
-        php.PIN_12,
-        php.PIN_13,
-        IrqsUart,
-        php.DMA_CH0,
-        php.DMA_CH1,
-        config,
-    );
-    let (uart_tx, uart_rx) = uart.split();
-
     let res = split_resources!(php);
     let dac = Dac::new(res.dac);
-
-    let rsplayer = rsplayer::RsPlayer::new(uart_tx);
 
     let flash = flash::Storage::new(res.flash);
 
@@ -171,9 +152,9 @@ fn main() -> ! {
     // Create embassy-usb Config
     let usb_config = {
         let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
-        config.manufacturer = Some("Embassy");
-        config.product = Some("USB-serial example");
-        config.serial_number = Some("12345678");
+        config.manufacturer = Some("RSPlayer");
+        config.product = Some("RSPlayer-firmware");
+        config.serial_number = Some("000001");
         config.max_power = 100;
         config.max_packet_size_0 = 64;
         config
@@ -203,7 +184,8 @@ fn main() -> ! {
         let state = STATE.init(State::new());
         CdcAcmClass::new(&mut usb_builder, state, 64)
     };
-
+     let (usb_tx, usb_rx) = usb_class.split();
+     let rsplayer = rsplayer::RsPlayer::new(usb_tx);
     // Build the builder.
     let usb_device = usb_builder.build();
 
@@ -214,10 +196,6 @@ fn main() -> ! {
         move || {
             let executor1 = EXECUTOR1.init(Executor::new());
             executor1.run(|spawner| {
-                unwrap!(spawner.spawn(uart_serial::listen_uart_commands(
-                    CMD_CHANNEL.sender(),
-                    uart_rx
-                )));
                 unwrap!(spawner.spawn(io::rotary::listen_rotary_encoder(
                     CMD_CHANNEL.sender(),
                     encoder
@@ -237,7 +215,7 @@ fn main() -> ! {
         unwrap!(spawner.spawn(dim_display()));
         unwrap!(spawner.spawn(process_commands(dac, rsplayer, res.out, res.display, flash)));
         unwrap!(spawner.spawn(usb_task(usb_device)));
-        unwrap!(spawner.spawn(usb::listen_usb_commands(CMD_CHANNEL.sender(), usb_class)));
+        unwrap!(spawner.spawn(usb::listen_usb_commands(CMD_CHANNEL.sender(), usb_rx)));
     });
 }
 
@@ -326,7 +304,7 @@ pub async fn process_commands(
                 } else {
                     debug!("Powering off");
                     mute_out_relay.set_low();
-                    rsplayer.send_command("PowerOff");
+                    rsplayer.send_command("PowerOff").await;
                     Timer::after_millis(20000).await;
                     pwr_psu_relay.set_low();
                     pwr_pi_relay.set_low();
@@ -349,31 +327,31 @@ pub async fn process_commands(
                 let new_val = dac.volume_up().await;
                 flash.save_volume(new_val);
                 disp.draw_volume(new_val, &mut buff);
-                rsplayer.send_current_volume(new_val);
+                rsplayer.send_current_volume(new_val).await;
             }
             Command::VolumeDown => {
                 info!("got VolumeDown");
                 let new_val = dac.volume_down().await;
                 flash.save_volume(new_val);
                 disp.draw_volume(new_val, &mut buff);
-                rsplayer.send_current_volume(new_val);
+                rsplayer.send_current_volume(new_val).await;
             }
             Command::SetVolume(vol) => {
                 info!("Received SetVolume({})", vol);
                 dac.set_volume(vol).await;
                 flash.save_volume(vol);
                 disp.draw_volume(vol, &mut buff);
-                rsplayer.send_current_volume(vol);
+                rsplayer.send_current_volume(vol).await;
             }
             Command::ToggleRandomPlay => {
                 info!("got ToggleRandomPlay");
-                rsplayer.send_command("RandomToggle");
+                rsplayer.send_command("RandomToggle").await;
             }
             Command::ToggleInput => {
                 // select optical or coaxial input
                 if input_signal_relay.is_set_low() {
                     info!("Input signal relay set high");
-                    rsplayer.send_command("Stop");
+                    rsplayer.send_command("Stop").await;
                     input_signal_relay.set_high();
                     flash.save_input(1);
                     disp.draw_input_signal("Optical", &mut buff);
@@ -381,20 +359,20 @@ pub async fn process_commands(
                 // select i2s input
                 else {
                     info!("Input signal relay set low");
-                    rsplayer.send_command("Play");
+                    rsplayer.send_command("Play").await;
                     input_signal_relay.set_low();
                     flash.save_input(0);
                     disp.draw_input_signal("I2S", &mut buff);
                 }
             }
             Command::Next => {
-                rsplayer.send_command("Next");
+                rsplayer.send_command("Next").await;
             }
             Command::Prev => {
-                rsplayer.send_command("Prev");
+                rsplayer.send_command("Prev").await;
             }
             Command::TogglePlay => {
-                rsplayer.send_command("TogglePlay");
+                rsplayer.send_command("TogglePlay").await;
             }
             Command::NextDacSoundSetting => {
                 info!("got NextDacSoundSetting");
@@ -422,7 +400,7 @@ pub async fn process_commands(
             }
             Command::QueryCurrentVolume => {
                 let vol = flash.load_volume();
-                rsplayer.send_current_volume(vol);
+                rsplayer.send_current_volume(vol).await;
             }
         }
     }

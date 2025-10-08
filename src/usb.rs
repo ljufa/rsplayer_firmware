@@ -2,24 +2,22 @@ use defmt::{error, info};
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Sender};
 
 use crate::Command;
-use embassy_rp::{peripherals::USB, usb::Driver};
-use embassy_usb::class::cdc_acm::CdcAcmClass;
 
 use heapless::Vec;
 
 #[embassy_executor::task]
 pub async fn listen_usb_commands(
     control: Sender<'static, ThreadModeRawMutex, Command, 64>,
-    mut class: CdcAcmClass<'static, Driver<'static, USB>>,
+    mut usb_rx: embassy_usb::class::cdc_acm::Receiver<'static, embassy_rp::usb::Driver<'static, embassy_rp::peripherals::USB>>
 ) {
     let mut buf = [0; 64];
     let mut received_data: Vec<u8, 128> = Vec::new();
 
     loop {
-        class.wait_connection().await;
+        usb_rx.wait_connection().await;
         info!("Connected");
         loop {
-            match class.read_packet(&mut buf).await {
+            match usb_rx.read_packet(&mut buf).await {
                 Ok(0) => {
                     info!("Disconnected");
                     break;
