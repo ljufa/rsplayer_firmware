@@ -151,11 +151,12 @@ fn main() -> ! {
 
     // Create embassy-usb Config
     let usb_config = {
-        let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
+        let mut config = embassy_usb::Config::new(0xc0fe, 0xb0b1);
         config.manufacturer = Some("RSPlayer");
-        config.product = Some("RSPlayer-firmware");
+        config.product = Some("rsplayer-firmware-v1.0");
         config.serial_number = Some("000001");
-        config.max_power = 100;
+        config.self_powered = true;
+        config.max_power = 0;
         config.max_packet_size_0 = 64;
         config
     };
