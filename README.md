@@ -6,10 +6,10 @@ It works in conjunction with the main `rsplayer` application (running on a separ
 
 ## Features
 
-*   **System Control:** Communicates with the main `rsplayer` application via UART to send commands like Play, Pause, Next, Previous, and Power Off.
+*   **System Control:** Communicates with the main `rsplayer` application via USB to send commands like Play, Pause, Next, Previous, and Power Off.
 *   **Power Management:** Controls power relays for the entire system, including the host Raspberry Pi and the main Power Supply Unit (PSU).
 *   **User Interface:**
-    *   Displays system status, volume levels, and input source on a 128x64 ST7920-based LCD.
+    *   Displays system status, volume levels, and input source on a 128x64 ST7920 or ILI9488 LCD.
     *   Automatically dims and turns off the display backlight after a period of inactivity.
 *   **Input Handling:**
     *   **IR Remote:** Responds to commands from a standard NEC-protocol IR remote.
@@ -18,8 +18,8 @@ It works in conjunction with the main `rsplayer` application (running on a separ
         *   Short Press: Toggles Play/Pause.
         *   Long Press (>5s): Toggles system power.
 *   **DAC Control:**
-    *   Directly manages an I2C-connected DAC.
-    *   Software-based volume control.
+    *   Directly manages an I2C-connected DAC (AK4490 and AK4497 currently).
+    *   DAC software volume control (serial mode).
     *   Switches between DSD and PCM modes.
     *   Cycles through various DAC digital filters and sound settings.
 *   **Input Source Selection:** Toggles between the internal I2S signal from the host and an external optical/coaxial input.
@@ -34,12 +34,12 @@ It works in conjunction with the main `rsplayer` application (running on a separ
 This firmware is specifically tailored for the custom hardware designed in the `rsplayer_hardware` project. The key components are:
 
 *   **Microcontroller:** Raspberry Pi Pico (RP2040)
-*   **Display:** ST7920-based 128x64 monochrome LCD.
+*   **Display:** ST7920-based 128x64 monochrome LCD or ILI9488 based 480x320.
 *   **DAC:** An I2C-controlled Digital-to-Analog Converter.
 *   **Inputs:**
     *   Standard IR receiver (e.g., TSOP38238).
     *   Rotary encoder with an integrated push-button.
-*   **Communication:** UART interface for connecting to the host system.
+*   **Communication:** USB interface for connecting to the host system.
 
 ## Related Projects
 
