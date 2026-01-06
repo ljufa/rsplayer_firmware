@@ -2,22 +2,21 @@
 #![no_main]
 #![allow(async_fn_in_trait)]
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::Ordering::SeqCst;
 
 use assign_resources::assign_resources;
-use dac::Dac;
+
 use defmt::unwrap;
 use defmt::{debug, info};
 use display::OledDisplay;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{self, I2C1,  USB};
+use embassy_rp::peripherals::{self, I2C1, USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::rotary_encoder::{PioEncoder, PioEncoderProgram};
 
+use embassy_rp::bind_interrupts;
 use embassy_rp::usb::{Driver, InterruptHandler};
-use embassy_rp::{bind_interrupts};
 use embassy_sync::mutex::Mutex;
-use embassy_time::{block_for, Duration, Timer};
+use embassy_time::Timer;
 
 use embassy_executor::Executor;
 
@@ -30,18 +29,33 @@ use embassy_usb::UsbDevice;
 use heapless::String;
 use static_cell::StaticCell;
 
+use crate::amanero::Amanero;
+use crate::rsplayer::RsPlayer;
 use embassy_rp::peripherals::PIO0;
-use {defmt_rtt as _, panic_probe as _};
+
+use crate::dac::common::{Akm44xxDac, FilterType};
+use dac::common::SampleRate;
+// Only one of these will be active based on the feature flag
+#[cfg(feature = "debug")]
+use panic_probe as _;
+#[cfg(feature = "debug")]
+use {defmt_rtt as _};
+
+#[cfg(feature = "release")]
+use panic_reset as _;
+
 mod dac;
 mod display;
 
+mod amanero;
 mod flash;
 mod fmtbuf;
+// mod gpio;
 mod i2c_helper;
-mod io;
+mod ir;
+mod rotary;
 mod rsplayer;
 mod usb;
-mod ir;
 
 bind_interrupts!(struct IrqsI2c {
     I2C1_IRQ => embassy_rp::i2c::InterruptHandler<I2C1>;
@@ -54,26 +68,34 @@ bind_interrupts!(struct IrqsUsb {
 });
 
 assign_resources! {
+    amanero: AmaneroPins{
+        dsd_on: PIN_10,
+        mute_en: PIN_11,
+        f0: PIN_4,
+        f1: PIN_5,
+        f2: PIN_8,
+        f3: PIN_9,
+    }
     out: OutputPins {
         pin0: PIN_0,
         pin1: PIN_1,
         pin6: PIN_6,
-        pin7: PIN_7,
+        // pin7: PIN_7,
     }
     dac: DacResources{
         i2c: I2C1,
         pin15_i2c_scl: PIN_15,
         pin14_i2c_sda: PIN_14,
-        pin2_dac_pdc: PIN_2,
+        pin2_dac_pdn: PIN_2,
     }
     display: DisplayResources {
         spi0: SPI0,
         dmach3: DMA_CH3,
+        pin7_spi_dc: PIN_7,
         pin18_spi_sck: PIN_18,
         pin19_spi_tx: PIN_19,
         pin20_spi_rst: PIN_20,
         pin22_blk_gnd: PIN_22,
-        pin5_dummy_cs: PIN_5,
     }
     flash: FlashResources {
         flash: FLASH,
@@ -88,10 +110,23 @@ assign_resources! {
 
 static DISPLAY: Mutex<CriticalSectionRawMutex, Option<OledDisplay>> = Mutex::new(None);
 
-#[derive(Eq, PartialEq, PartialOrd)]
+#[derive(Eq, PartialEq, PartialOrd, Debug)]
 enum Command {
-    Mute,
-    Unmute,
+    UpdateSampleRate(SampleRate),
+    UpdateTrackInfo {
+        title: String<64>,
+        artist: String<64>,
+        album: String<64>,
+    },
+    UpdateVU {
+        left: u8,
+        right: u8,
+    },
+    UpdateProgress {
+        current: String<16>,
+        total: String<16>,
+        percent: u8,
+    },
     TogglePower,
     VolumeUp,
     VolumeDown,
@@ -103,12 +138,12 @@ enum Command {
     TogglePlay,
     NextDacSoundSetting,
     NextDacFilterType,
-    ToggleDacDsdPcmMode,
     ToggleDacDsdDclkPolarity,
     ToggleDacDsdCutoffFreqFilter,
     ToggleDacDsdDclksClock,
     QueryCurrentVolume,
     ToggleRandomPlay,
+    ToggleVUMode,
 }
 
 static CMD_CHANNEL: Channel<ThreadModeRawMutex, Command, 64> = Channel::new();
@@ -125,11 +160,11 @@ fn main() -> ! {
     // defmt RTT header. Reading that header might touch flash memory, which
     // interferes with flash write operations.
     // https://github.com/knurling-rs/defmt/pull/683
-    block_for(Duration::from_millis(50));
+    // block_for(Duration::from_millis(150));
 
     let res = split_resources!(php);
-    let dac = Dac::new(res.dac);
-
+    let dac = Akm44xxDac::new(res.dac);
+    let amanero = Amanero::new(res.amanero);
     let flash = flash::Storage::new(res.flash);
 
     let Pio {
@@ -185,8 +220,8 @@ fn main() -> ! {
         let state = STATE.init(State::new());
         CdcAcmClass::new(&mut usb_builder, state, 64)
     };
-     let (usb_tx, usb_rx) = usb_class.split();
-     let rsplayer = rsplayer::RsPlayer::new(usb_tx);
+    let (usb_tx, usb_rx) = usb_class.split();
+    let rsplayer = RsPlayer::new(usb_tx);
     // Build the builder.
     let usb_device = usb_builder.build();
 
@@ -197,15 +232,16 @@ fn main() -> ! {
         move || {
             let executor1 = EXECUTOR1.init(Executor::new());
             executor1.run(|spawner| {
-                unwrap!(spawner.spawn(io::rotary::listen_rotary_encoder(
+                unwrap!(spawner.spawn(rotary::listen_rotary_encoder(
                     CMD_CHANNEL.sender(),
                     encoder
                 )));
-                unwrap!(spawner.spawn(io::rotary::listen_rotary_encoder_button(
+                unwrap!(spawner.spawn(rotary::listen_rotary_encoder_button(
                     CMD_CHANNEL.sender(),
                     res.rotary.pin21_sw
                 )));
                 unwrap!(spawner.spawn(ir::listen_ir_receiver(CMD_CHANNEL.sender(), php.PIN_3)));
+                unwrap!(spawner.spawn(amanero::listen_pin_changes(CMD_CHANNEL.sender(), amanero)));
             });
         },
     );
@@ -213,7 +249,7 @@ fn main() -> ! {
     // receive commands on core0
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
-        unwrap!(spawner.spawn(dim_display()));
+        // unwrap!(spawner.spawn(tick_display()));
         unwrap!(spawner.spawn(process_commands(dac, rsplayer, res.out, res.display, flash)));
         unwrap!(spawner.spawn(usb_task(usb_device)));
         unwrap!(spawner.spawn(usb::listen_usb_commands(CMD_CHANNEL.sender(), usb_rx)));
@@ -242,18 +278,27 @@ pub async fn dim_display() {
 }
 
 #[embassy_executor::task]
+pub async fn tick_display() {
+    loop {
+        if let Some(disp) = DISPLAY.lock().await.as_mut() {
+            disp.tick();
+        }
+        Timer::after_millis(100).await;
+    }
+}
+
+#[embassy_executor::task]
 pub async fn process_commands(
-    mut dac: Dac,
-    mut rsplayer: rsplayer::RsPlayer,
-    out: OutputPins,
+    mut dac: Akm44xxDac,
+    mut rsplayer: RsPlayer,
+    out_resources: OutputPins,
     display_resources: DisplayResources,
     mut flash: flash::Storage,
 ) {
-    // set power pins to low
-    let mut pwr_pi_relay = Output::new(out.pin7, Level::Low);
-    let mut pwr_psu_relay = Output::new(out.pin1, Level::Low);
-    let mut mute_out_relay = Output::new(out.pin0, Level::Low);
-    let mut input_signal_relay = Output::new(out.pin6, Level::Low);
+    let mut pwr_psu_relay = Output::new(out_resources.pin1, Level::Low);
+    let mut mute_out_relay = Output::new(out_resources.pin0, Level::Low);
+    let mut i2s_signal_select = Output::new(out_resources.pin6, Level::High);
+    let mut last_sample_rate = None;
     {
         DISPLAY
             .lock()
@@ -261,87 +306,125 @@ pub async fn process_commands(
             .replace(OledDisplay::new(display_resources));
     }
     DISPLAY.lock().await.as_mut().unwrap().draw_powered_off();
-    let mut buff = String::<32>::new();
-
+    mute_out_relay.set_low();
+    let mut vu_mode_fullscreen = false;
+    let mut current_volume = flash.load_volume();
     loop {
         let cmd = CMD_CHANNEL.receive().await;
-        let is_power_on = POWER_ON.load(SeqCst);
+        let is_power_on = POWER_ON.load(core::sync::atomic::Ordering::SeqCst);
         if cmd != Command::TogglePower && !is_power_on {
             info!("Power is off, ignoring command");
             continue;
         }
-        let mut disp = DISPLAY.lock().await;
-        let disp = disp.as_mut().unwrap();
+        let input = flash.load_input();
+        let stored_filter = flash.load_filter_type();
+        let mut current_input = if input == 0 { "OPT" } else { "USB" };
+        let mut current_filter = FilterType::from(stored_filter).as_str();
+
         match cmd {
+            Command::ToggleVUMode => {
+                vu_mode_fullscreen = !vu_mode_fullscreen;
+                let mut disp = DISPLAY.lock().await;
+                let d = disp.as_mut().unwrap();
+                d.set_fullscreen_vu_mode(vu_mode_fullscreen);
+                d.clear_main_area();
+                if !vu_mode_fullscreen {
+                    if current_input == "OPT" {
+                        d.draw_large_volume(current_volume);
+                    } else {
+                        d.redraw_track_info();
+                        d.draw_progress_bar("00:00", "00:00", 0.0);
+                    }
+                } else {
+                    d.draw_fullscreen_vu_labels();
+                }
+            }
             Command::TogglePower => {
-                info!("got TogglePower");
+                let mut disp_lock = DISPLAY.lock().await;
+                let disp = disp_lock.as_mut().unwrap();
                 if !is_power_on {
-                    debug!("Powering on");
                     pwr_psu_relay.set_high();
-                    POWER_ON.store(true, SeqCst);
-                    Timer::after_millis(500).await;
-                    dac.initialize().await;
-                    pwr_pi_relay.set_high();
-                    disp.clear();
-                    disp.draw_powering_on();
-                    // wait for RPI to boot
-                    Timer::after_millis(20000).await;
-                    disp.clear();
-                    let vol = flash.load_volume();
-                    debug!("Stored volume: {}", vol);
-                    dac.set_volume(vol).await;
-                    disp.draw_volume(vol, &mut buff);
-                    let input = flash.load_input();
+                    Timer::after_millis(1000).await;
+                    POWER_ON.store(true, core::sync::atomic::Ordering::Relaxed);
+
+                    let stored_sound = flash.load_sound_setting();
+                    let stored_volume = flash.load_volume();
+                    current_volume = stored_volume;
+                    dac.initialize(stored_filter, stored_sound).await;
+                    dac.set_volume(stored_volume).await;
                     debug!("Stored input: {}", input);
                     if input == 0 {
-                        input_signal_relay.set_low();
-                        disp.draw_input_signal("I2S", &mut buff);
+                        i2s_signal_select.set_low();
                     } else {
-                        input_signal_relay.set_high();
-                        disp.draw_input_signal("Optical", &mut buff);
+                        i2s_signal_select.set_high();
                     }
-                    mute_out_relay.set_high();
-                    debug!("Powered on");
+                    disp.turn_on_backlight();
+                    disp.draw_background();
+                    disp.draw_layout_lines();
+                    disp.draw_header_status(current_input, current_filter);
+                    disp.draw_volume(stored_volume);
+                    if !vu_mode_fullscreen {
+                        if input == 0 {
+                            disp.draw_large_volume(stored_volume);
+                        } else {
+                            disp.redraw_track_info();
+                            disp.draw_progress_bar("00:00", "00:00", 0.0);
+                        }
+                    }
+                    disp.draw_footer("", "", "");
                 } else {
                     debug!("Powering off");
                     mute_out_relay.set_low();
-                    rsplayer.send_command("PowerOff").await;
-                    Timer::after_millis(20000).await;
+                    // rsplayer.send_command("PowerOff").await;
                     pwr_psu_relay.set_low();
-                    pwr_pi_relay.set_low();
-                    POWER_ON.store(false, SeqCst);
+                    POWER_ON.store(false, core::sync::atomic::Ordering::SeqCst);
                     disp.draw_powered_off();
                     debug!("Powered off");
                 }
-                Timer::after_millis(2000).await;
-            }
-            Command::Mute => {
-                info!("got Mute");
-                mute_out_relay.set_low();
-            }
-            Command::Unmute => {
-                info!("got Unmute");
-                mute_out_relay.set_high();
             }
             Command::VolumeUp => {
                 info!("got VolumeUp");
                 let new_val = dac.volume_up().await;
                 flash.save_volume(new_val);
-                disp.draw_volume(new_val, &mut buff);
+                current_volume = new_val;
+                {
+                    let mut d = DISPLAY.lock().await;
+                    let disp = d.as_mut().unwrap();
+                    disp.draw_volume(new_val);
+                    if current_input == "OPT" && !vu_mode_fullscreen {
+                        disp.draw_large_volume(new_val);
+                    }
+                }
                 rsplayer.send_current_volume(new_val).await;
             }
             Command::VolumeDown => {
                 info!("got VolumeDown");
                 let new_val = dac.volume_down().await;
                 flash.save_volume(new_val);
-                disp.draw_volume(new_val, &mut buff);
+                current_volume = new_val;
+                {
+                    let mut d = DISPLAY.lock().await;
+                    let disp = d.as_mut().unwrap();
+                    disp.draw_volume(new_val);
+                    if current_input == "OPT" && !vu_mode_fullscreen {
+                        disp.draw_large_volume(new_val);
+                    }
+                }
                 rsplayer.send_current_volume(new_val).await;
             }
             Command::SetVolume(vol) => {
                 info!("Received SetVolume({})", vol);
                 dac.set_volume(vol).await;
                 flash.save_volume(vol);
-                disp.draw_volume(vol, &mut buff);
+                current_volume = vol;
+                {
+                    let mut d = DISPLAY.lock().await;
+                    let disp = d.as_mut().unwrap();
+                    disp.draw_volume(vol);
+                    if current_input == "OPT" && !vu_mode_fullscreen {
+                        disp.draw_large_volume(vol);
+                    }
+                }
                 rsplayer.send_current_volume(vol).await;
             }
             Command::ToggleRandomPlay => {
@@ -349,23 +432,42 @@ pub async fn process_commands(
                 rsplayer.send_command("RandomToggle").await;
             }
             Command::ToggleInput => {
+                mute_out_relay.set_low();
+                Timer::after_millis(100).await;
                 // select optical or coaxial input
-                if input_signal_relay.is_set_low() {
+                if i2s_signal_select.is_set_low() {
                     info!("Input signal relay set high");
-                    rsplayer.send_command("Stop").await;
-                    input_signal_relay.set_high();
+                    i2s_signal_select.set_high();
                     flash.save_input(1);
-                    disp.draw_input_signal("Optical", &mut buff);
+                    current_input = "USB";
+                    let mut d = DISPLAY.lock().await;
+                    let disp = d.as_mut().unwrap();
+                    disp.clear_main_area();
+                    disp.draw_header_status(current_input, current_filter);
+                    if !vu_mode_fullscreen {
+                        disp.redraw_track_info();
+                        disp.draw_progress_bar("00:00", "00:00", 0.0);
+                    }
                 }
                 // select i2s input
                 else {
                     info!("Input signal relay set low");
-                    rsplayer.send_command("Play").await;
-                    input_signal_relay.set_low();
+                    i2s_signal_select.set_low();
                     flash.save_input(0);
-                    disp.draw_input_signal("I2S", &mut buff);
+                    dac.dsd_pcm(SampleRate::Pcm441).await;
+                    current_input = "OPT";
+                    let mut d = DISPLAY.lock().await;
+                    let disp = d.as_mut().unwrap();
+                    disp.clear_main_area();
+                    disp.draw_header_status(current_input, current_filter);
+                    if !vu_mode_fullscreen {
+                        disp.draw_large_volume(current_volume);
+                    }
                 }
+                Timer::after_millis(100).await;
+                mute_out_relay.set_high();
             }
+
             Command::Next => {
                 rsplayer.send_command("Next").await;
             }
@@ -375,34 +477,84 @@ pub async fn process_commands(
             Command::TogglePlay => {
                 rsplayer.send_command("TogglePlay").await;
             }
-            Command::NextDacSoundSetting => {
-                info!("got NextDacSoundSetting");
-                dac.next_sound_setting().await;
-            }
             Command::NextDacFilterType => {
                 info!("got NextDacFilterType");
-                dac.next_filter().await;
+                let val = dac.next_filter().await;
+                flash.save_filter_type(val);
+                current_filter = FilterType::from(val).as_str();
+                DISPLAY
+                    .lock()
+                    .await
+                    .as_mut()
+                    .unwrap()
+                    .draw_header_status(current_input, current_filter);
             }
-            Command::ToggleDacDsdPcmMode => {
-                info!("got ToggleDacDsdPcmMode");
-                dac.toggle_dsd_pcm().await;
+            Command::NextDacSoundSetting => {
+                info!("got NextDacSoundSetting");
+                let val = dac.next_sound_setting().await;
+                flash.save_sound_setting(val);
             }
-            Command::ToggleDacDsdDclkPolarity => {
-                info!("got ToggleDacDsdDclkPolarity");
-                dac.toggle_dsd_dclk_polarity().await;
-            }
-            Command::ToggleDacDsdCutoffFreqFilter => {
-                info!("got ToggleDacDsdCutoffFreqFilter");
-                dac.toggle_dsd_cutoff_freq_filter().await;
-            }
-            Command::ToggleDacDsdDclksClock => {
-                info!("got ToggleDacDsdDclksClock");
-                dac.toggle_dsd_dcks_clock().await;
-            }
+
             Command::QueryCurrentVolume => {
                 let vol = flash.load_volume();
                 rsplayer.send_current_volume(vol).await;
             }
+            Command::UpdateSampleRate(rate) => {
+                debug!("Sample rate command: {}", rate);
+                if last_sample_rate == Some(rate) {
+                    continue;
+                }
+                mute_out_relay.set_low();
+                Timer::after_millis(50).await;
+                dac.dsd_pcm(rate).await;
+                Timer::after_millis(50).await;
+                mute_out_relay.set_high();
+                last_sample_rate = Some(rate);
+                let (format, freq, bit_depth) = rate.to_str();
+                DISPLAY
+                    .lock()
+                    .await
+                    .as_mut()
+                    .unwrap()
+                    .draw_footer(format, freq, bit_depth);
+            }
+            Command::UpdateTrackInfo {
+                title,
+                artist,
+                album,
+            } => {
+                if !vu_mode_fullscreen && current_input != "OPT" {
+                    DISPLAY
+                        .lock()
+                        .await
+                        .as_mut()
+                        .unwrap()
+                        .draw_track_info(&title, &artist, &album);
+                }
+            }
+            Command::UpdateProgress {
+                current,
+                total,
+                percent,
+            } => {
+                if !vu_mode_fullscreen && current_input != "OPT" {
+                    DISPLAY.lock().await.as_mut().unwrap().draw_progress_bar(
+                        &current,
+                        &total,
+                        percent as f32 / 100.0,
+                    );
+                }
+            }
+            Command::UpdateVU { left, right } => {
+                let mut disp = DISPLAY.lock().await;
+                let d = disp.as_mut().unwrap();
+                if vu_mode_fullscreen {
+                    d.draw_fullscreen_vu_meter(left, right, current_volume);
+                } else {
+                    d.draw_vu_meter(left, right, current_volume);
+                }
+            }
+            _ => {}
         }
     }
 }

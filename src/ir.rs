@@ -7,7 +7,8 @@ use infrared::{protocol::Nec, Receiver};
 use crate::Command;
 use embassy_rp::{
     gpio::{Input, Pull},
-    peripherals::PIN_3, Peri,
+    peripherals::PIN_3,
+    Peri,
 };
 #[embassy_executor::task]
 pub async fn listen_ir_receiver(
@@ -17,7 +18,6 @@ pub async fn listen_ir_receiver(
     let mut ir_pin = Input::new(pin3, Pull::Down);
     let mut ir_recv: Receiver<Nec> = Receiver::new(1_000_000);
     let mut lastedge = Instant::now();
-    let mut repeat_cnt = 0;
     loop {
         ir_pin.wait_for_any_edge().await;
         let rising = ir_pin.is_high();
@@ -64,22 +64,10 @@ pub async fn listen_ir_receiver(
                         control.send(Command::NextDacSoundSetting).await
                     }
                 }
-                //home button
-                83 => {
-                    if !cmd.repeat {
-                        control.send(Command::ToggleDacDsdPcmMode).await
-                    }
-                }
                 // power button
-                81 => {
-                    if cmd.repeat {
-                        repeat_cnt += 1;
-                        if repeat_cnt > 10 {
-                            control.send(Command::TogglePower).await;
-                            repeat_cnt = 0;
-                        }
-                    } else {
-                        repeat_cnt = 0;
+                9 => {
+                    if !cmd.repeat {
+                        control.send(Command::TogglePower).await;
                     }
                 }
                 // 1 button
@@ -98,6 +86,12 @@ pub async fn listen_ir_receiver(
                 51 => {
                     if !cmd.repeat {
                         control.send(Command::ToggleDacDsdDclksClock).await
+                    }
+                }
+                // 4 button
+                52 => {
+                    if !cmd.repeat {
+                        control.send(Command::ToggleVUMode).await
                     }
                 }
                 // VOL+ button

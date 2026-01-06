@@ -10,6 +10,8 @@ const ADDR_OFFSET: u32 = 0x100000;
 
 const VOLUME_OFFSET: u32 = 0x00;
 const INPUT_OFFSET: u32 = 0x1000;
+const FILTER_OFFSET: u32 = 0x2000;
+const SOUND_OFFSET: u32 = 0x3000;
 
 pub struct Storage {
     flash: Flash<'static, FLASH, Async, FLASH_SIZE>,
@@ -31,6 +33,18 @@ impl Storage {
     }
     pub fn load_input(&mut self) -> u8 {
         self.read_u8(INPUT_OFFSET)
+    }
+    pub fn save_filter_type(&mut self, filter: u8) {
+        self.write_u8(FILTER_OFFSET, filter);
+    }
+    pub fn load_filter_type(&mut self) -> u8 {
+        self.read_u8(FILTER_OFFSET)
+    }
+    pub fn save_sound_setting(&mut self, setting: u8) {
+        self.write_u8(SOUND_OFFSET, setting);
+    }
+    pub fn load_sound_setting(&mut self) -> u8 {
+        self.read_u8(SOUND_OFFSET)
     }
 
     fn write_u8(&mut self, offset: u32, data: u8) {

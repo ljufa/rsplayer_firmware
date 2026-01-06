@@ -25,6 +25,10 @@ It works in conjunction with the main `rsplayer` application (running on a separ
 *   **Input Source Selection:** Toggles between the internal I2S signal from the host and an external optical/coaxial input.
 *   **Persistent Settings:** Saves the last used volume and input source to the microcontroller's flash memory, restoring them on startup.
 
+## Demo
+[![Watch the video](https://img.youtube.com/vi/8EiTv39dqec/maxresdefault.jpg)](https://youtube.com/shorts/8EiTv39dqec)
+[![Watch the video](https://img.youtube.com/vi/vZ4sb1H7nrk/maxresdefault.jpg)](https://youtube.com/shorts/vZ4sb1H7nrk)
+
 ## Hardware
 
 This firmware is specifically tailored for the custom hardware designed in the `rsplayer_hardware` project. The key components are:
