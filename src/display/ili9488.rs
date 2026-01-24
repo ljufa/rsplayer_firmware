@@ -758,7 +758,7 @@ mod hardware {
                 di,
                 rst,
                 &mut Delay,
-                Orientation::LandscapeFlipped,
+                Orientation::Landscape,
                 Rgb666Mode,
             )
             .expect("could not init display");
