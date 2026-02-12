@@ -299,13 +299,19 @@ pub async fn process_commands(
     let mut mute_out_relay = Output::new(out_resources.pin0, Level::Low);
     let mut i2s_signal_select = Output::new(out_resources.pin6, Level::High);
     let mut last_sample_rate = None;
+    
+    // Backup resources for re-initialization if needed
+    let mut display_res = Some(display_resources);
+
     {
-        DISPLAY
-            .lock()
-            .await
-            .replace(OledDisplay::new(display_resources));
+        let res = display_res.take().unwrap();
+        let mut d_lock = DISPLAY.lock().await;
+        d_lock.replace(OledDisplay::new(res));
     }
-    DISPLAY.lock().await.as_mut().unwrap().draw_powered_off();
+    
+    if let Some(disp) = DISPLAY.lock().await.as_mut() {
+        disp.draw_powered_off();
+    }
     mute_out_relay.set_low();
     let mut vu_mode_fullscreen = false;
     let mut current_volume = flash.load_volume();
@@ -324,8 +330,8 @@ pub async fn process_commands(
         match cmd {
             Command::ToggleVUMode => {
                 vu_mode_fullscreen = !vu_mode_fullscreen;
-                let mut disp = DISPLAY.lock().await;
-                let d = disp.as_mut().unwrap();
+                let mut disp_lock = DISPLAY.lock().await;
+                let d = disp_lock.as_mut().unwrap();
                 d.set_fullscreen_vu_mode(vu_mode_fullscreen);
                 d.clear_main_area();
                 if !vu_mode_fullscreen {
@@ -340,12 +346,14 @@ pub async fn process_commands(
                 }
             }
             Command::TogglePower => {
-                let mut disp_lock = DISPLAY.lock().await;
-                let disp = disp_lock.as_mut().unwrap();
+                let is_power_on = POWER_ON.load(core::sync::atomic::Ordering::SeqCst);
                 if !is_power_on {
                     pwr_psu_relay.set_high();
                     Timer::after_millis(1000).await;
+
                     POWER_ON.store(true, core::sync::atomic::Ordering::Relaxed);
+                    let mut disp_lock = DISPLAY.lock().await;
+                    let disp = disp_lock.as_mut().unwrap();
 
                     let stored_sound = flash.load_sound_setting();
                     let stored_volume = flash.load_volume();
@@ -355,8 +363,10 @@ pub async fn process_commands(
                     debug!("Stored input: {}", input);
                     if input == 0 {
                         i2s_signal_select.set_low();
+                        dac.dsd_pcm(SampleRate::Pcm441).await;
                     } else {
                         i2s_signal_select.set_high();
+                        amanero::REFRESH_SAMPLE_RATE.signal(());
                     }
                     disp.turn_on_backlight();
                     disp.draw_background();
@@ -375,10 +385,15 @@ pub async fn process_commands(
                 } else {
                     debug!("Powering off");
                     mute_out_relay.set_low();
-                    // rsplayer.send_command("PowerOff").await;
+                    
+                    if let Some(disp) = DISPLAY.lock().await.as_mut() {
+                        disp.draw_powered_off();
+                    }
+                    Timer::after_millis(200).await;
+
                     pwr_psu_relay.set_low();
                     POWER_ON.store(false, core::sync::atomic::Ordering::SeqCst);
-                    disp.draw_powered_off();
+                    last_sample_rate = None;
                     debug!("Powered off");
                 }
             }
@@ -389,10 +404,11 @@ pub async fn process_commands(
                 current_volume = new_val;
                 {
                     let mut d = DISPLAY.lock().await;
-                    let disp = d.as_mut().unwrap();
-                    disp.draw_volume(new_val);
-                    if current_input == "OPT" && !vu_mode_fullscreen {
-                        disp.draw_large_volume(new_val);
+                    if let Some(disp) = d.as_mut() {
+                        disp.draw_volume(new_val);
+                        if current_input == "OPT" && !vu_mode_fullscreen {
+                            disp.draw_large_volume(new_val);
+                        }
                     }
                 }
                 rsplayer.send_current_volume(new_val).await;
@@ -404,10 +420,11 @@ pub async fn process_commands(
                 current_volume = new_val;
                 {
                     let mut d = DISPLAY.lock().await;
-                    let disp = d.as_mut().unwrap();
-                    disp.draw_volume(new_val);
-                    if current_input == "OPT" && !vu_mode_fullscreen {
-                        disp.draw_large_volume(new_val);
+                    if let Some(disp) = d.as_mut() {
+                        disp.draw_volume(new_val);
+                        if current_input == "OPT" && !vu_mode_fullscreen {
+                            disp.draw_large_volume(new_val);
+                        }
                     }
                 }
                 rsplayer.send_current_volume(new_val).await;
@@ -419,10 +436,11 @@ pub async fn process_commands(
                 current_volume = vol;
                 {
                     let mut d = DISPLAY.lock().await;
-                    let disp = d.as_mut().unwrap();
-                    disp.draw_volume(vol);
-                    if current_input == "OPT" && !vu_mode_fullscreen {
-                        disp.draw_large_volume(vol);
+                    if let Some(disp) = d.as_mut() {
+                        disp.draw_volume(vol);
+                        if current_input == "OPT" && !vu_mode_fullscreen {
+                            disp.draw_large_volume(vol);
+                        }
                     }
                 }
                 rsplayer.send_current_volume(vol).await;
@@ -434,14 +452,16 @@ pub async fn process_commands(
             Command::ToggleInput => {
                 mute_out_relay.set_low();
                 Timer::after_millis(100).await;
+                last_sample_rate = None;
                 // select optical or coaxial input
                 if i2s_signal_select.is_set_low() {
                     info!("Input signal relay set high");
                     i2s_signal_select.set_high();
                     flash.save_input(1);
                     current_input = "USB";
-                    let mut d = DISPLAY.lock().await;
-                    let disp = d.as_mut().unwrap();
+                    amanero::REFRESH_SAMPLE_RATE.signal(());
+                    let mut d_lock = DISPLAY.lock().await;
+                    let disp = d_lock.as_mut().unwrap();
                     disp.clear_main_area();
                     disp.draw_header_status(current_input, current_filter);
                     if !vu_mode_fullscreen {
@@ -456,8 +476,8 @@ pub async fn process_commands(
                     flash.save_input(0);
                     dac.dsd_pcm(SampleRate::Pcm441).await;
                     current_input = "OPT";
-                    let mut d = DISPLAY.lock().await;
-                    let disp = d.as_mut().unwrap();
+                    let mut d_lock = DISPLAY.lock().await;
+                    let disp = d_lock.as_mut().unwrap();
                     disp.clear_main_area();
                     disp.draw_header_status(current_input, current_filter);
                     if !vu_mode_fullscreen {
@@ -482,12 +502,9 @@ pub async fn process_commands(
                 let val = dac.next_filter().await;
                 flash.save_filter_type(val);
                 current_filter = FilterType::from(val).as_str();
-                DISPLAY
-                    .lock()
-                    .await
-                    .as_mut()
-                    .unwrap()
-                    .draw_header_status(current_input, current_filter);
+                if let Some(disp) = DISPLAY.lock().await.as_mut() {
+                    disp.draw_header_status(current_input, current_filter);
+                }
             }
             Command::NextDacSoundSetting => {
                 info!("got NextDacSoundSetting");
@@ -500,6 +517,9 @@ pub async fn process_commands(
                 rsplayer.send_current_volume(vol).await;
             }
             Command::UpdateSampleRate(rate) => {
+                if input != 1 {
+                    continue;
+                }
                 debug!("Sample rate command: {}", rate);
                 if last_sample_rate == Some(rate) {
                     continue;
@@ -511,12 +531,9 @@ pub async fn process_commands(
                 mute_out_relay.set_high();
                 last_sample_rate = Some(rate);
                 let (format, freq, bit_depth) = rate.to_str();
-                DISPLAY
-                    .lock()
-                    .await
-                    .as_mut()
-                    .unwrap()
-                    .draw_footer(format, freq, bit_depth);
+                if let Some(disp) = DISPLAY.lock().await.as_mut() {
+                    disp.draw_footer(format, freq, bit_depth);
+                }
             }
             Command::UpdateTrackInfo {
                 title,
@@ -524,12 +541,9 @@ pub async fn process_commands(
                 album,
             } => {
                 if !vu_mode_fullscreen && current_input != "OPT" {
-                    DISPLAY
-                        .lock()
-                        .await
-                        .as_mut()
-                        .unwrap()
-                        .draw_track_info(&title, &artist, &album);
+                    if let Some(disp) = DISPLAY.lock().await.as_mut() {
+                        disp.draw_track_info(&title, &artist, &album);
+                    }
                 }
             }
             Command::UpdateProgress {
@@ -538,20 +552,19 @@ pub async fn process_commands(
                 percent,
             } => {
                 if !vu_mode_fullscreen && current_input != "OPT" {
-                    DISPLAY.lock().await.as_mut().unwrap().draw_progress_bar(
-                        &current,
-                        &total,
-                        percent as f32 / 100.0,
-                    );
+                    if let Some(disp) = DISPLAY.lock().await.as_mut() {
+                        disp.draw_progress_bar(&current, &total, percent as f32 / 100.0);
+                    }
                 }
             }
             Command::UpdateVU { left, right } => {
-                let mut disp = DISPLAY.lock().await;
-                let d = disp.as_mut().unwrap();
-                if vu_mode_fullscreen {
-                    d.draw_fullscreen_vu_meter(left, right, current_volume);
-                } else {
-                    d.draw_vu_meter(left, right, current_volume);
+                let mut disp_lock = DISPLAY.lock().await;
+                if let Some(d) = disp_lock.as_mut() {
+                    if vu_mode_fullscreen {
+                        d.draw_fullscreen_vu_meter(left, right, current_volume);
+                    } else {
+                        d.draw_vu_meter(left, right, current_volume);
+                    }
                 }
             }
             _ => {}

@@ -65,20 +65,33 @@ The firmware is built using the `embassy` async framework for embedded Rust.
 
 ### Building
 
-Clone the repository and build the firmware in release mode:
+Clone the repository and build the firmware:
 
 ```sh
 git clone https://github.com/ljufa/rsplayer_firmware.git
 cd rsplayer_firmware
-cargo build --release
+```
+
+To build for production/release:
+
+```sh
+cargo build --release --features release,ak4497,ili9488 --no-default-features
 ```
 
 ### Flashing
 
 Connect the debug probe to your development machine and the target hardware. Then, use `probe-rs` to flash the firmware.
 
+To flash the release binary:
+
+```sh
+probe-rs download --chip RP2040 @/dev/shm/cargo_target/thumbv6m-none-eabi/release/rsplayer_firmware
+```
+
+For development:
+
 ```sh
 probe-rs run --chip RP2040 --connect-under-reset
 ```
 
-The command specified in the `.cargo/config.toml` file will be used, which simplifies the process.
+The command specified in the `.cargo/config.toml` file will be used for `cargo run`, which simplifies the process.

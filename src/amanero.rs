@@ -1,11 +1,15 @@
 use defmt::debug;
-use embassy_futures::select::{select3, select4};
+use embassy_futures::select::{select, select3, select4};
 use embassy_rp::gpio::Input;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Sender};
 use embassy_time::Timer;
 
-use crate::{AmaneroPins, Command};
 use crate::dac::common::SampleRate;
+use crate::{AmaneroPins, Command};
+
+pub static REFRESH_SAMPLE_RATE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 pub struct Amanero {
     dsd_on: Input<'static>,
@@ -84,22 +88,28 @@ pub async fn listen_pin_changes(
     }
 
     loop {
-        select3(
-            amanero.dsd_on.wait_for_any_edge(),
-            amanero.mute_en.wait_for_any_edge(),
-            select4(
-                amanero.f0.wait_for_any_edge(),
-                amanero.f1.wait_for_any_edge(),
-                amanero.f2.wait_for_any_edge(),
-                amanero.f3.wait_for_any_edge(),
+        match select(
+            REFRESH_SAMPLE_RATE.wait(),
+            select3(
+                amanero.dsd_on.wait_for_any_edge(),
+                amanero.mute_en.wait_for_any_edge(),
+                select4(
+                    amanero.f0.wait_for_any_edge(),
+                    amanero.f1.wait_for_any_edge(),
+                    amanero.f2.wait_for_any_edge(),
+                    amanero.f3.wait_for_any_edge(),
+                ),
             ),
         )
-        .await;
-
-        let sample_rate = amanero.read_sample_rate();
-        debug!("amanero send update rate command: {}", sample_rate);
-        if sample_rate != SampleRate::Unknown {
-            control.send(Command::UpdateSampleRate(sample_rate)).await;
+        .await
+        {
+            _ => {
+                let sample_rate = amanero.read_sample_rate();
+                debug!("amanero send update rate command: {}", sample_rate);
+                if sample_rate != SampleRate::Unknown {
+                    control.send(Command::UpdateSampleRate(sample_rate)).await;
+                }
+            }
         }
     }
 }
