@@ -1,13 +1,13 @@
 
 pub struct FmtBuf {
-    buf: [u8; 16],
+    buf: [u8; 64],
     ptr: usize,
 }
 
 impl FmtBuf {
     pub fn new() -> Self {
         Self {
-            buf: [0; 16],
+            buf: [0; 64],
             ptr: 0,
         }
     }

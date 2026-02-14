@@ -91,7 +91,7 @@ pub async fn listen_ir_receiver(
                 // 4 button
                 52 => {
                     if !cmd.repeat {
-                        control.send(Command::ToggleVUMode).await
+                        control.send(Command::ToggleDisplayMode).await
                     }
                 }
                 // VOL+ button

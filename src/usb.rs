@@ -2,6 +2,7 @@ use defmt::{error, info};
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Sender};
 
 use crate::Command;
+use crate::PlaybackMode;
 
 use heapless::{String, Vec};
 
@@ -87,6 +88,19 @@ pub async fn listen_usb_commands(
                                                     percent: pct,
                                                 }).await;
                                             }
+                                        }
+                                    }
+                                } else if received_str.starts_with("SetPlaybackMode(") && received_str.ends_with(")") {
+                                    if let Some(mode_str) = received_str.strip_prefix("SetPlaybackMode(").and_then(|s| s.strip_suffix(")")) {
+                                        let mode = match mode_str {
+                                            "Random" => Some(PlaybackMode::Random),
+                                            "Sequential" => Some(PlaybackMode::Sequential),
+                                            "LoopSingle" => Some(PlaybackMode::LoopSingle),
+                                            "LoopQueue" => Some(PlaybackMode::LoopQueue),
+                                            _ => None,
+                                        };
+                                        if let Some(m) = mode {
+                                            control.send(Command::UpdatePlaybackMode(m)).await;
                                         }
                                     }
                                 }

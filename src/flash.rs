@@ -12,6 +12,7 @@ const VOLUME_OFFSET: u32 = 0x00;
 const INPUT_OFFSET: u32 = 0x1000;
 const FILTER_OFFSET: u32 = 0x2000;
 const SOUND_OFFSET: u32 = 0x3000;
+const DISPLAY_MODE_OFFSET: u32 = 0x4000;
 
 pub struct Storage {
     flash: Flash<'static, FLASH, Async, FLASH_SIZE>,
@@ -45,6 +46,13 @@ impl Storage {
     }
     pub fn load_sound_setting(&mut self) -> u8 {
         self.read_u8(SOUND_OFFSET)
+    }
+
+    pub fn save_display_mode(&mut self, mode: u8) {
+        self.write_u8(DISPLAY_MODE_OFFSET, mode);
+    }
+    pub fn load_display_mode(&mut self) -> u8 {
+        self.read_u8(DISPLAY_MODE_OFFSET)
     }
 
     fn write_u8(&mut self, offset: u32, data: u8) {

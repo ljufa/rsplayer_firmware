@@ -7,7 +7,7 @@ use assign_resources::assign_resources;
 
 use defmt::unwrap;
 use defmt::{debug, info};
-use display::OledDisplay;
+use display::{DisplayMode, OledDisplay};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{self, I2C1, USB};
 use embassy_rp::pio::Pio;
@@ -35,6 +35,14 @@ use embassy_rp::peripherals::PIO0;
 
 use crate::dac::common::{Akm44xxDac, FilterType};
 use dac::common::SampleRate;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, defmt::Format)]
+pub enum PlaybackMode {
+    Sequential,
+    Random,
+    LoopSingle,
+    LoopQueue,
+}
 // Only one of these will be active based on the feature flag
 #[cfg(feature = "debug")]
 use panic_probe as _;
@@ -127,6 +135,7 @@ enum Command {
         total: String<16>,
         percent: u8,
     },
+    UpdatePlaybackMode(PlaybackMode),
     TogglePower,
     VolumeUp,
     VolumeDown,
@@ -143,7 +152,7 @@ enum Command {
     ToggleDacDsdDclksClock,
     QueryCurrentVolume,
     ToggleRandomPlay,
-    ToggleVUMode,
+    ToggleDisplayMode,
 }
 
 static CMD_CHANNEL: Channel<ThreadModeRawMutex, Command, 64> = Channel::new();
@@ -313,8 +322,14 @@ pub async fn process_commands(
         disp.draw_powered_off();
     }
     mute_out_relay.set_low();
-    let mut vu_mode_fullscreen = false;
     let mut current_volume = flash.load_volume();
+    let saved_display_mode = flash.load_display_mode();
+    let mut display_mode = DisplayMode::from(saved_display_mode);
+    if let Some(disp) = DISPLAY.lock().await.as_mut() {
+        disp.set_display_mode(display_mode);
+    }
+    
+    let mut current_playback_mode = PlaybackMode::Sequential;
     loop {
         let cmd = CMD_CHANNEL.receive().await;
         let is_power_on = POWER_ON.load(core::sync::atomic::Ordering::SeqCst);
@@ -328,21 +343,41 @@ pub async fn process_commands(
         let mut current_filter = FilterType::from(stored_filter).as_str();
 
         match cmd {
-            Command::ToggleVUMode => {
-                vu_mode_fullscreen = !vu_mode_fullscreen;
+            Command::ToggleDisplayMode => {
+                display_mode = match display_mode {
+                    DisplayMode::Normal => DisplayMode::VuMeter,
+                    DisplayMode::VuMeter => DisplayMode::BigInfo,
+                    DisplayMode::BigInfo => DisplayMode::Normal,
+                };
+                flash.save_display_mode(display_mode as u8);
+                
                 let mut disp_lock = DISPLAY.lock().await;
                 let d = disp_lock.as_mut().unwrap();
-                d.set_fullscreen_vu_mode(vu_mode_fullscreen);
-                d.clear_main_area();
-                if !vu_mode_fullscreen {
-                    if current_input == "OPT" {
-                        d.draw_large_volume(current_volume);
-                    } else {
-                        d.redraw_track_info();
-                        d.draw_progress_bar("00:00", "00:00", 0.0);
+                d.set_display_mode(display_mode);
+
+                d.draw_background();
+                d.draw_layout_lines();
+
+                match display_mode {
+                    DisplayMode::Normal => {
+                        d.draw_header_status(current_input, current_filter);
+                        d.redraw_footer();
+                        if current_input == "OPT" {
+                            d.draw_large_volume(current_volume);
+                        } else {
+                            d.redraw_track_info();
+                            d.draw_progress_bar("00:00", "00:00", 0.0);
+                        }
                     }
-                } else {
-                    d.draw_fullscreen_vu_labels();
+                    DisplayMode::VuMeter => {
+                        d.draw_fullscreen_vu_labels();
+                    }
+                    DisplayMode::BigInfo => {
+                        d.redraw_track_info();
+                        d.draw_volume(current_volume);
+                        d.draw_playback_mode(current_playback_mode);
+                        d.redraw_footer();
+                    }
                 }
             }
             Command::TogglePower => {
@@ -372,16 +407,27 @@ pub async fn process_commands(
                     disp.draw_background();
                     disp.draw_layout_lines();
                     disp.draw_header_status(current_input, current_filter);
+                    disp.draw_playback_mode(current_playback_mode);
                     disp.draw_volume(stored_volume);
-                    if !vu_mode_fullscreen {
-                        if input == 0 {
-                            disp.draw_large_volume(stored_volume);
-                        } else {
+                    match display_mode {
+                        DisplayMode::Normal => {
+                            if input == 0 {
+                                disp.draw_large_volume(stored_volume);
+                            } else {
+                                disp.redraw_track_info();
+                                disp.draw_progress_bar("00:00", "00:00", 0.0);
+                            }
+                        }
+                        DisplayMode::VuMeter => {
+                             disp.draw_fullscreen_vu_labels();
+                        }
+                        DisplayMode::BigInfo => {
                             disp.redraw_track_info();
-                            disp.draw_progress_bar("00:00", "00:00", 0.0);
+                            disp.redraw_footer();
                         }
                     }
                     disp.draw_footer("", "", "");
+                    // rsplayer.send_command("QueryCurrentPlayerInfo").await;
                 } else {
                     debug!("Powering off");
                     mute_out_relay.set_low();
@@ -406,7 +452,7 @@ pub async fn process_commands(
                     let mut d = DISPLAY.lock().await;
                     if let Some(disp) = d.as_mut() {
                         disp.draw_volume(new_val);
-                        if current_input == "OPT" && !vu_mode_fullscreen {
+                        if current_input == "OPT" && display_mode == DisplayMode::Normal {
                             disp.draw_large_volume(new_val);
                         }
                     }
@@ -422,7 +468,7 @@ pub async fn process_commands(
                     let mut d = DISPLAY.lock().await;
                     if let Some(disp) = d.as_mut() {
                         disp.draw_volume(new_val);
-                        if current_input == "OPT" && !vu_mode_fullscreen {
+                        if current_input == "OPT" && display_mode == DisplayMode::Normal {
                             disp.draw_large_volume(new_val);
                         }
                     }
@@ -438,7 +484,7 @@ pub async fn process_commands(
                     let mut d = DISPLAY.lock().await;
                     if let Some(disp) = d.as_mut() {
                         disp.draw_volume(vol);
-                        if current_input == "OPT" && !vu_mode_fullscreen {
+                        if current_input == "OPT" && display_mode == DisplayMode::Normal {
                             disp.draw_large_volume(vol);
                         }
                     }
@@ -446,8 +492,8 @@ pub async fn process_commands(
                 rsplayer.send_current_volume(vol).await;
             }
             Command::ToggleRandomPlay => {
-                info!("got ToggleRandomPlay");
-                rsplayer.send_command("RandomToggle").await;
+                info!("got CyclePlaybackMode");
+                rsplayer.send_command("CyclePlaybackMode").await;
             }
             Command::ToggleInput => {
                 mute_out_relay.set_low();
@@ -464,7 +510,8 @@ pub async fn process_commands(
                     let disp = d_lock.as_mut().unwrap();
                     disp.clear_main_area();
                     disp.draw_header_status(current_input, current_filter);
-                    if !vu_mode_fullscreen {
+                    disp.draw_playback_mode(current_playback_mode);
+                    if display_mode == DisplayMode::Normal {
                         disp.redraw_track_info();
                         disp.draw_progress_bar("00:00", "00:00", 0.0);
                     }
@@ -480,7 +527,8 @@ pub async fn process_commands(
                     let disp = d_lock.as_mut().unwrap();
                     disp.clear_main_area();
                     disp.draw_header_status(current_input, current_filter);
-                    if !vu_mode_fullscreen {
+                    disp.draw_playback_mode(current_playback_mode);
+                    if display_mode == DisplayMode::Normal {
                         disp.draw_large_volume(current_volume);
                     }
                 }
@@ -540,7 +588,7 @@ pub async fn process_commands(
                 artist,
                 album,
             } => {
-                if !vu_mode_fullscreen && current_input != "OPT" {
+                if display_mode != DisplayMode::VuMeter && current_input != "OPT" {
                     if let Some(disp) = DISPLAY.lock().await.as_mut() {
                         disp.draw_track_info(&title, &artist, &album);
                     }
@@ -551,16 +599,23 @@ pub async fn process_commands(
                 total,
                 percent,
             } => {
-                if !vu_mode_fullscreen && current_input != "OPT" {
+                if display_mode == DisplayMode::Normal && current_input != "OPT" {
                     if let Some(disp) = DISPLAY.lock().await.as_mut() {
                         disp.draw_progress_bar(&current, &total, percent as f32 / 100.0);
                     }
                 }
             }
+            Command::UpdatePlaybackMode(mode) => {
+                debug!("UpdatePlaybackMode received: {:?}", mode);
+                current_playback_mode = mode;
+                if let Some(disp) = DISPLAY.lock().await.as_mut() {
+                    disp.draw_playback_mode(mode);
+                }
+            }
             Command::UpdateVU { left, right } => {
                 let mut disp_lock = DISPLAY.lock().await;
                 if let Some(d) = disp_lock.as_mut() {
-                    if vu_mode_fullscreen {
+                    if display_mode == DisplayMode::VuMeter {
                         d.draw_fullscreen_vu_meter(left, right, current_volume);
                     } else {
                         d.draw_vu_meter(left, right, current_volume);

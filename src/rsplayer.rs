@@ -14,8 +14,8 @@ impl RsPlayer {
         RsPlayer { usb_sender }
     }
     pub async fn send_command(&mut self, cmd: &str) {
-        if cmd.len() > 16 {
-            error!("Command too long");
+        if cmd.len() > 64 {
+            error!("Command [{}] too long", cmd);
             return;
         }
         let buff = &mut FmtBuf::new();

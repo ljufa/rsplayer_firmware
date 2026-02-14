@@ -91,7 +91,8 @@ probe-rs download --chip RP2040 @/dev/shm/cargo_target/thumbv6m-none-eabi/releas
 For development:
 
 ```sh
-probe-rs run --chip RP2040 --connect-under-reset
+cargo run
 ```
+if it fails or stuck run ctrl-c && `probe-rs info` first
 
 The command specified in the `.cargo/config.toml` file will be used for `cargo run`, which simplifies the process.
