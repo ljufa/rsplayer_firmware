@@ -385,7 +385,7 @@ where
     }
 
     pub fn tick(&mut self) {
-        self.scroll_tick += 2;
+        self.scroll_tick += 3;
         if self.display_mode == DisplayMode::Normal {
             self.draw_track_info_internal();
         } else if self.display_mode == DisplayMode::BigInfo {
@@ -806,7 +806,14 @@ where
     }
 
     pub fn clear_main_area(&mut self) {
-        Rectangle::new(Point::new(0, 62), Size::new(480, 203))
+        let y_start = if self.display_mode == DisplayMode::BigInfo {
+            0
+        } else {
+            62
+        };
+        let height = 265 - y_start;
+
+        Rectangle::new(Point::new(0, y_start), Size::new(480, height as u32))
             .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
                 COL_BG_BASE,
             ))

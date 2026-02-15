@@ -258,7 +258,7 @@ fn main() -> ! {
     // receive commands on core0
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
-        // unwrap!(spawner.spawn(tick_display()));
+        unwrap!(spawner.spawn(tick_display()));
         unwrap!(spawner.spawn(process_commands(dac, rsplayer, res.out, res.display, flash)));
         unwrap!(spawner.spawn(usb_task(usb_device)));
         unwrap!(spawner.spawn(usb::listen_usb_commands(CMD_CHANNEL.sender(), usb_rx)));
@@ -289,10 +289,13 @@ pub async fn dim_display() {
 #[embassy_executor::task]
 pub async fn tick_display() {
     loop {
-        if let Some(disp) = DISPLAY.lock().await.as_mut() {
-            disp.tick();
+        let is_power_on = POWER_ON.load(core::sync::atomic::Ordering::Relaxed);
+        if is_power_on {
+            if let Some(disp) = DISPLAY.lock().await.as_mut() {
+                disp.tick();
+            }
         }
-        Timer::after_millis(100).await;
+        Timer::after_millis(50).await;
     }
 }
 
@@ -530,6 +533,8 @@ pub async fn process_commands(
                     disp.draw_playback_mode(current_playback_mode);
                     if display_mode == DisplayMode::Normal {
                         disp.draw_large_volume(current_volume);
+                    } else if display_mode == DisplayMode::BigInfo {
+                        disp.draw_volume(current_volume);
                     }
                 }
                 Timer::after_millis(100).await;

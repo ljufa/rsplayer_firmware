@@ -1,0 +1,36 @@
+[env]
+CARGO_TARGET_DIR = "/dev/shm/cargo_target"
+
+[tasks.check]
+description = "Check the code for errors"
+command = "cargo"
+args = ["check"]
+
+[tasks.build-debug]
+description = "Build the firmware in debug mode"
+command = "cargo"
+args = ["build"]
+
+[tasks.probe-wake]
+description = "Wake up probe-rs to prevent hanging"
+script = "timeout -s SIGINT 2s probe-rs info || true"
+
+[tasks.flash-debug]
+description = "Build, flash and attach debug (auto-reconnect)"
+dependencies = ["probe-wake"]
+script = '''
+cargo build
+cargo run || true
+probe-rs attach --chip RP2040 ${CARGO_TARGET_DIR}/thumbv6m-none-eabi/debug/rsplayer_firmware
+'''
+
+[tasks.build-release]
+description = "Build the firmware in release mode"
+command = "cargo"
+args = ["build", "--release", "--no-default-features", "--features", "release,ak4497,ili9488"]
+
+[tasks.flash-release]
+description = "Flash the firmware in release mode"
+command = "probe-rs"
+args = ["download", "--chip", "RP2040", "${CARGO_TARGET_DIR}/thumbv6m-none-eabi/release/rsplayer_firmware"]
+dependencies = ["probe-wake", "build-release"]
