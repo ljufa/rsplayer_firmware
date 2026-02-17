@@ -1,8 +1,8 @@
 use core::fmt::Write;
 use defmt::{debug, error, info};
 use embassy_rp::{peripherals::USB, usb::Driver};
-use embassy_usb::class::cdc_acm::Sender;
 use embassy_time::{with_timeout, Duration};
+use embassy_usb::class::cdc_acm::Sender;
 
 use crate::fmtbuf::FmtBuf;
 
@@ -21,13 +21,24 @@ impl RsPlayer {
         let buff = &mut FmtBuf::new();
         _ = writeln!(buff, "{}", cmd);
         debug!("Sending command: {}", buff.as_str());
-        
-        if with_timeout(Duration::from_millis(100), self.usb_sender.wait_connection()).await.is_err() {
+
+        if with_timeout(
+            Duration::from_millis(100),
+            self.usb_sender.wait_connection(),
+        )
+        .await
+        .is_err()
+        {
             debug!("USB not connected (timeout), skipping command sending");
             return;
         }
 
-        match with_timeout(Duration::from_millis(500), self.usb_sender.write_packet(buff.as_str().as_bytes())).await {
+        match with_timeout(
+            Duration::from_millis(500),
+            self.usb_sender.write_packet(buff.as_str().as_bytes()),
+        )
+        .await
+        {
             Ok(Ok(_)) => debug!("Write packet success"),
             Ok(Err(e)) => error!("Failed to write packet: {}", e),
             Err(_) => error!("Write packet timed out"),

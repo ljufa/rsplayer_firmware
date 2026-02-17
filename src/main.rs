@@ -13,10 +13,11 @@ use embassy_rp::peripherals::{self, I2C1, USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::rotary_encoder::{PioEncoder, PioEncoderProgram};
 
+use embassy_futures::select::{select, Either};
 use embassy_rp::bind_interrupts;
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_sync::mutex::Mutex;
-use embassy_time::Timer;
+use embassy_time::{Instant, Timer};
 
 use embassy_executor::Executor;
 
@@ -45,9 +46,9 @@ pub enum PlaybackMode {
 }
 // Only one of these will be active based on the feature flag
 #[cfg(feature = "debug")]
-use panic_probe as _;
+use defmt_rtt as _;
 #[cfg(feature = "debug")]
-use {defmt_rtt as _};
+use panic_probe as _;
 
 #[cfg(feature = "release")]
 use panic_reset as _;
@@ -292,10 +293,10 @@ pub async fn tick_display() {
         let is_power_on = POWER_ON.load(core::sync::atomic::Ordering::Relaxed);
         if is_power_on {
             if let Some(disp) = DISPLAY.lock().await.as_mut() {
-                disp.tick();
+                disp.tick().await;
             }
         }
-        Timer::after_millis(50).await;
+        Timer::after_millis(1000).await;
     }
 }
 
@@ -311,7 +312,7 @@ pub async fn process_commands(
     let mut mute_out_relay = Output::new(out_resources.pin0, Level::Low);
     let mut i2s_signal_select = Output::new(out_resources.pin6, Level::High);
     let mut last_sample_rate = None;
-    
+
     // Backup resources for re-initialization if needed
     let mut display_res = Some(display_resources);
 
@@ -320,7 +321,7 @@ pub async fn process_commands(
         let mut d_lock = DISPLAY.lock().await;
         d_lock.replace(OledDisplay::new(res));
     }
-    
+
     if let Some(disp) = DISPLAY.lock().await.as_mut() {
         disp.draw_powered_off();
     }
@@ -331,10 +332,30 @@ pub async fn process_commands(
     if let Some(disp) = DISPLAY.lock().await.as_mut() {
         disp.set_display_mode(display_mode);
     }
-    
+
     let mut current_playback_mode = PlaybackMode::Sequential;
+    let mut silence_start_time: Option<Instant> = None;
+
     loop {
-        let cmd = CMD_CHANNEL.receive().await;
+        let cmd_future = CMD_CHANNEL.receive();
+        let timeout_future = Timer::after_secs(5);
+
+        let cmd = match select(cmd_future, timeout_future).await {
+            Either::First(c) => c,
+            Either::Second(_) => {
+                if let Some(start) = silence_start_time {
+                    if start.elapsed().as_secs() > 30 {
+                        if let Some(disp) = DISPLAY.lock().await.as_mut() {
+                            disp.clear_track_info();
+                            disp.draw_footer("", "", "");
+                        }
+                        silence_start_time = None; // Cleared
+                    }
+                }
+                continue;
+            }
+        };
+
         let is_power_on = POWER_ON.load(core::sync::atomic::Ordering::SeqCst);
         if cmd != Command::TogglePower && !is_power_on {
             info!("Power is off, ignoring command");
@@ -353,7 +374,7 @@ pub async fn process_commands(
                     DisplayMode::BigInfo => DisplayMode::Normal,
                 };
                 flash.save_display_mode(display_mode as u8);
-                
+
                 let mut disp_lock = DISPLAY.lock().await;
                 let d = disp_lock.as_mut().unwrap();
                 d.set_display_mode(display_mode);
@@ -368,6 +389,7 @@ pub async fn process_commands(
                         if current_input == "OPT" {
                             d.draw_large_volume(current_volume);
                         } else {
+                            d.draw_volume(current_volume);
                             d.redraw_track_info();
                             d.draw_progress_bar("00:00", "00:00", 0.0);
                         }
@@ -422,7 +444,7 @@ pub async fn process_commands(
                             }
                         }
                         DisplayMode::VuMeter => {
-                             disp.draw_fullscreen_vu_labels();
+                            disp.draw_fullscreen_vu_labels();
                         }
                         DisplayMode::BigInfo => {
                             disp.redraw_track_info();
@@ -434,7 +456,7 @@ pub async fn process_commands(
                 } else {
                     debug!("Powering off");
                     mute_out_relay.set_low();
-                    
+
                     if let Some(disp) = DISPLAY.lock().await.as_mut() {
                         disp.draw_powered_off();
                     }
@@ -524,13 +546,15 @@ pub async fn process_commands(
                     info!("Input signal relay set low");
                     i2s_signal_select.set_low();
                     flash.save_input(0);
-                    dac.dsd_pcm(SampleRate::Pcm441).await;
                     current_input = "OPT";
                     let mut d_lock = DISPLAY.lock().await;
                     let disp = d_lock.as_mut().unwrap();
                     disp.clear_main_area();
+                    disp.clear_track_info();
                     disp.draw_header_status(current_input, current_filter);
-                    disp.draw_playback_mode(current_playback_mode);
+                    disp.draw_playback_mode(PlaybackMode::Sequential);
+                    rsplayer.send_command("Stop").await;
+                    dac.dsd_pcm(SampleRate::Pcm441).await;
                     if display_mode == DisplayMode::Normal {
                         disp.draw_large_volume(current_volume);
                     } else if display_mode == DisplayMode::BigInfo {
@@ -574,6 +598,17 @@ pub async fn process_commands(
                     continue;
                 }
                 debug!("Sample rate command: {}", rate);
+
+                if rate == SampleRate::Unknown {
+                    if silence_start_time.is_none() {
+                        silence_start_time = Some(Instant::now());
+                    }
+                    // Do not update relays or display immediately
+                    continue;
+                } else {
+                    silence_start_time = None;
+                }
+
                 if last_sample_rate == Some(rate) {
                     continue;
                 }
@@ -593,6 +628,7 @@ pub async fn process_commands(
                 artist,
                 album,
             } => {
+                silence_start_time = None;
                 if display_mode != DisplayMode::VuMeter && current_input != "OPT" {
                     if let Some(disp) = DISPLAY.lock().await.as_mut() {
                         disp.draw_track_info(&title, &artist, &album);
@@ -604,6 +640,7 @@ pub async fn process_commands(
                 total,
                 percent,
             } => {
+                silence_start_time = None;
                 if display_mode == DisplayMode::Normal && current_input != "OPT" {
                     if let Some(disp) = DISPLAY.lock().await.as_mut() {
                         disp.draw_progress_bar(&current, &total, percent as f32 / 100.0);
@@ -618,6 +655,7 @@ pub async fn process_commands(
                 }
             }
             Command::UpdateVU { left, right } => {
+                silence_start_time = None;
                 let mut disp_lock = DISPLAY.lock().await;
                 if let Some(d) = disp_lock.as_mut() {
                     if display_mode == DisplayMode::VuMeter {

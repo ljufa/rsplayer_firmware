@@ -35,11 +35,8 @@ impl embedded_hal_1::digital::ErrorType for DummyCs {
     type Error = core::convert::Infallible;
 }
 
-type SpiDeviceDisp = ExclusiveDevice<
-    spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Async>,
-    DummyCs,
-    Delay,
->;
+type SpiDeviceDisp =
+    ExclusiveDevice<spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Async>, DummyCs, Delay>;
 
 type Display = st7920::ST7920<SpiDeviceDisp, Output<'static>, Output<'static>>;
 

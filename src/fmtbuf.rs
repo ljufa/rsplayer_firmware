@@ -1,4 +1,3 @@
-
 pub struct FmtBuf {
     buf: [u8; 64],
     ptr: usize,

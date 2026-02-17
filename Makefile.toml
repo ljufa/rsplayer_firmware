@@ -13,7 +13,11 @@ args = ["build"]
 
 [tasks.probe-wake]
 description = "Wake up probe-rs to prevent hanging"
-script = "timeout -s SIGINT 2s probe-rs info || true"
+script = '''
+timeout -s SIGINT 2s probe-rs info || true
+sleep 1
+probe-rs info
+'''
 
 [tasks.flash-debug]
 description = "Build, flash and attach debug (auto-reconnect)"

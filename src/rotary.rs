@@ -1,15 +1,15 @@
+use crate::Command;
 use defmt::info;
+use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::{
     gpio::Level,
     peripherals::{PIN_21, PIO0},
     pio_programs::rotary_encoder::{Direction, PioEncoder},
     Peri,
 };
-use embassy_rp::gpio::{Input, Pull};
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::{with_deadline, with_timeout, Duration, Instant, Timer};
-use crate::Command;
 
 #[embassy_executor::task]
 pub async fn listen_rotary_encoder(

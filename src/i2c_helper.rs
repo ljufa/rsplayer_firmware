@@ -10,16 +10,16 @@ pub struct I2CHelper {
     addr: u8,
 }
 
-
-
-
 const ADDR_AK4497: u8 = 0x13;
 
 impl I2CHelper {
     pub fn new(
         i2c: i2c::I2c<'static, embassy_rp::peripherals::I2C1, i2c::Async>,
     ) -> Result<Self, Error> {
-        Ok(I2CHelper { i2c, addr: ADDR_AK4497 })
+        Ok(I2CHelper {
+            i2c,
+            addr: ADDR_AK4497,
+        })
     }
 
     pub(crate) async fn write_register(&mut self, reg_addr: u8, value: u8) {

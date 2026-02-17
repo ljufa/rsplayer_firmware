@@ -1,9 +1,8 @@
+use crate::dac::common::{Akm44xxDac, FilterType, SampleRate};
 use defmt::*;
 use embassy_time::Timer;
-use crate::dac::common::{Akm44xxDac, FilterType, SampleRate};
 
 impl Akm44xxDac {
-
     pub async fn initialize(&mut self, filter: u8, sound: u8) {
         self.filter_type = filter;
         self.sound_setting = sound;
@@ -20,7 +19,6 @@ impl Akm44xxDac {
             info!("Register {:x} = {:b}", i, register)
         }
     }
-
 
     pub async fn change_sound_setting(&mut self, setting_no: u8) {
         match setting_no {
@@ -91,7 +89,6 @@ impl Akm44xxDac {
         self.filter_type
     }
 
-
     pub async fn dsd_pcm(&mut self, sample_rate: SampleRate) {
         if sample_rate.is_dsd() {
             // switch to DSD mode
@@ -123,6 +120,4 @@ impl Akm44xxDac {
             self.i2c_helper.change_bit(0, 0, true).await;
         }
     }
-
-
 }

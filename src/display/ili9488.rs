@@ -36,7 +36,7 @@ const VU_TOP_Y: i32 = 62;
 
 // Shared buffer for line drawing to save RAM
 // Note: We use a static mutable buffer. Ensure single-threaded access (tick is sequential).
-static mut LINE_BUFFER: [Rgb666; 480 * 80] = [Rgb666::new(0, 0, 0); 480 * 80];
+static mut LINE_BUFFER: [Rgb666; 480 * 50] = [Rgb666::new(0, 0, 0); 480 * 50];
 
 pub struct LineBuffer<'a> {
     buffer: &'a mut [Rgb666],
@@ -110,6 +110,7 @@ pub struct PlayerDisplay<D> {
     footer_format: String<16>,
     footer_freq: String<16>,
     footer_bit_depth: String<16>,
+    force_redraw: bool,
 }
 
 impl<D> PlayerDisplay<D>
@@ -130,7 +131,19 @@ where
             footer_format: String::new(),
             footer_freq: String::new(),
             footer_bit_depth: String::new(),
+            force_redraw: false,
         }
+    }
+
+    pub async fn tick(&mut self) {
+        self.scroll_tick += 50;
+        let update_scrolling_only = !self.force_redraw;
+        if self.display_mode == DisplayMode::Normal {
+            self.draw_track_info_internal(update_scrolling_only).await;
+        } else if self.display_mode == DisplayMode::BigInfo {
+            self.draw_big_info_internal(update_scrolling_only).await;
+        }
+        self.force_redraw = false;
     }
 
     pub fn set_display_mode(&mut self, mode: DisplayMode) {
@@ -296,17 +309,15 @@ where
     fn draw_footer_internal(&mut self) {
         let f = self.footer_format.clone();
         let fr = self.footer_freq.clone();
-        let b = self.footer_bit_depth.clone();
 
         self.draw_playback_mode_section();
         self.draw_footer_text_section(1, &f);
         self.draw_footer_text_section(2, &fr);
-        self.draw_footer_text_section(3, &b);
     }
 
-    pub fn draw_volume(&mut self, vol_db: u8) {
+    pub fn draw_volume(&mut self, vol: u8) {
         if self.display_mode == DisplayMode::BigInfo {
-            let width = 200;
+            let width = 300;
             let height = 60;
             let screen_x = (480 - width as i32) / 2;
             let screen_y = 200;
@@ -319,7 +330,8 @@ where
             let style = U8g2TextStyle::new(fonts::u8g2_font_fub42_tf, COL_1);
 
             let mut vol_str = String::<16>::new();
-            write!(&mut vol_str, "{}", vol_db).unwrap();
+            let db = (vol as f32 - 255.0) / 2.0;
+            write!(&mut vol_str, "{:.1} dB", db).unwrap();
 
             Text::with_text_style(
                 &vol_str,
@@ -342,7 +354,7 @@ where
             return;
         }
 
-        let x = 345;
+        let x = 340;
         let y = 25;
         let width = 130;
         let height = 30;
@@ -351,8 +363,6 @@ where
         buffer_slice.fill(COL_BG_BASE);
 
         let mut target = LineBuffer::new(buffer_slice, width, height);
-
-        let style_label = U8g2TextStyle::new(fonts::u8g2_font_helvB18_tf, Rgb666::WHITE);
         let style_value = U8g2TextStyle::new(fonts::u8g2_font_helvB18_tf, COL_1);
 
         let text_style_right = TextStyleBuilder::new()
@@ -361,11 +371,8 @@ where
             .build();
 
         let mut vol_str = String::<32>::new();
-        write!(&mut vol_str, "{}", vol_db).unwrap();
-
-        Text::new("| VOL:", Point::new(0, 20), style_label)
-            .draw(&mut target)
-            .ok();
+        let db = (vol as f32 - 255.0) / 2.0;
+        write!(&mut vol_str, "{:.1} dB", db).unwrap();
 
         Text::with_text_style(
             &vol_str,
@@ -384,14 +391,6 @@ where
             .ok();
     }
 
-    pub fn tick(&mut self) {
-        self.scroll_tick += 3;
-        if self.display_mode == DisplayMode::Normal {
-            self.draw_track_info_internal();
-        } else if self.display_mode == DisplayMode::BigInfo {
-            self.draw_big_info_internal();
-        }
-    }
 
     pub fn draw_track_info(&mut self, title: &str, artist: &str, album: &str) {
         self.track_title.clear();
@@ -401,66 +400,97 @@ where
         self.track_album.clear();
         self.track_album.push_str(album).ok();
         self.scroll_tick = 0;
-
-        match self.display_mode {
-            DisplayMode::Normal => self.draw_track_info_internal(),
-            DisplayMode::BigInfo => self.draw_big_info_internal(),
-            _ => {}
-        }
+        self.force_redraw = true;
     }
 
     pub fn redraw_track_info(&mut self) {
         self.scroll_tick = 0;
-        match self.display_mode {
-            DisplayMode::Normal => self.draw_track_info_internal(),
-            DisplayMode::BigInfo => self.draw_big_info_internal(),
-            _ => {}
-        }
+        self.force_redraw = true;
     }
 
-    fn draw_big_info_internal(&mut self) {
-        let style_title = U8g2TextStyle::new(fonts::u8g2_font_fub42_tf, Rgb666::WHITE);
-        let style_artist = U8g2TextStyle::new(fonts::u8g2_font_fub42_tf, COL_1);
+    pub fn clear_track_info(&mut self) {
+        self.track_title.clear();
+        self.track_artist.clear();
+        self.track_album.clear();
+        self.scroll_tick = 0;
+        self.force_redraw = true;
+    }
 
-        let content_width = 480;
-        let center_x = content_width / 2;
+    async fn draw_scrolling_text_line(
+        &mut self,
+        style: U8g2TextStyle<Rgb666>,
+        text: &str,
+        y: i32,
+        height: u32,
+        content_width: u32,
+        center_x: i32,
+        update_scrolling_only: bool,
+    ) {
+        let width = style
+            .measure_string(text, Point::zero(), Baseline::Middle)
+            .bounding_box
+            .size
+            .width as i32;
 
-        let mut draw_buffered_line =
-            |style: U8g2TextStyle<Rgb666>, text: &str, y: i32, height: u32| {
-                let width = style
-                    .measure_string(text, Point::zero(), Baseline::Middle)
-                    .bounding_box
-                    .size
-                    .width as i32;
+        if update_scrolling_only && width <= content_width as i32 {
+            return;
+        }
 
-                let buffer_slice =
-                    unsafe { &mut LINE_BUFFER[..(content_width as usize * height as usize)] };
-                buffer_slice.fill(COL_BG_BASE);
+        // Split large draw into smaller chunks to allow yielding
+        let chunk_height = 20;
+        let num_chunks = height.div_ceil(chunk_height);
 
-                let mut target = LineBuffer::new(buffer_slice, content_width as u32, height);
-                let local_y = height as i32 / 2;
+        for i in 0..num_chunks {
+            let chunk_y_start = i * chunk_height;
+            let current_chunk_height = if i == num_chunks - 1 {
+                height - chunk_y_start
+            } else {
+                chunk_height
+            };
 
-                if width <= content_width {
+            let buffer_slice = unsafe {
+                &mut LINE_BUFFER[..(content_width as usize * current_chunk_height as usize)]
+            };
+            buffer_slice.fill(COL_BG_BASE);
+
+            let mut target =
+                LineBuffer::new(buffer_slice, content_width, current_chunk_height);
+            let local_y = (height as i32 / 2) - chunk_y_start as i32;
+
+            if width <= content_width as i32 {
+                Text::with_text_style(
+                    text,
+                    Point::new(center_x, local_y),
+                    style.clone(),
+                    TextStyleBuilder::new()
+                        .alignment(Alignment::Center)
+                        .baseline(Baseline::Middle)
+                        .build(),
+                )
+                .draw(&mut target)
+                .ok();
+            } else {
+                let gap = 60;
+                let cycle = width + gap;
+                let offset = self.scroll_tick % cycle;
+                let x = 10 - offset;
+
+                Text::with_text_style(
+                    text,
+                    Point::new(x, local_y),
+                    style.clone(),
+                    TextStyleBuilder::new()
+                        .alignment(Alignment::Left)
+                        .baseline(Baseline::Middle)
+                        .build(),
+                )
+                .draw(&mut target)
+                .ok();
+
+                if x + width < content_width as i32 {
                     Text::with_text_style(
                         text,
-                        Point::new(center_x, local_y),
-                        style,
-                        TextStyleBuilder::new()
-                            .alignment(Alignment::Center)
-                            .baseline(Baseline::Middle)
-                            .build(),
-                    )
-                    .draw(&mut target)
-                    .ok();
-                } else {
-                    let gap = 60;
-                    let cycle = width + gap;
-                    let offset = self.scroll_tick % cycle;
-                    let x = 10 - offset;
-
-                    Text::with_text_style(
-                        text,
-                        Point::new(x, local_y),
+                        Point::new(x + cycle, local_y),
                         style.clone(),
                         TextStyleBuilder::new()
                             .alignment(Alignment::Left)
@@ -469,39 +499,62 @@ where
                     )
                     .draw(&mut target)
                     .ok();
-
-                    if x + width < content_width {
-                        Text::with_text_style(
-                            text,
-                            Point::new(x + cycle, local_y),
-                            style,
-                            TextStyleBuilder::new()
-                                .alignment(Alignment::Left)
-                                .baseline(Baseline::Middle)
-                                .build(),
-                        )
-                        .draw(&mut target)
-                        .ok();
-                    }
                 }
+            }
 
-                let screen_top = y - local_y;
-                self.display
-                    .fill_contiguous(
-                        &Rectangle::new(
-                            Point::new(0, screen_top),
-                            Size::new(content_width as u32, height),
+            let screen_top = y - (height as i32 / 2) + chunk_y_start as i32;
+            self.display
+                .fill_contiguous(
+                    &Rectangle::new(
+                        Point::new(
+                            if self.display_mode == DisplayMode::Normal {
+                                VU_MARGIN_X
+                            } else {
+                                0
+                            },
+                            screen_top,
                         ),
-                        target.buffer.iter().cloned(),
-                    )
-                    .ok();
-            };
+                        Size::new(content_width, current_chunk_height),
+                    ),
+                    target.buffer.iter().cloned(),
+                )
+                .ok();
 
-        draw_buffered_line(style_artist, &self.track_artist, 55, 70);
-        draw_buffered_line(style_title, &self.track_title, 135, 70);
+            #[cfg(target_arch = "arm")]
+            embassy_futures::yield_now().await;
+        }
     }
 
-    fn draw_track_info_internal(&mut self) {
+    async fn draw_big_info_internal(&mut self, update_scrolling_only: bool) {
+        let style_title = U8g2TextStyle::new(fonts::u8g2_font_fub42_tf, Rgb666::WHITE);
+        let style_artist = U8g2TextStyle::new(fonts::u8g2_font_fub42_tf, COL_1);
+
+        let content_width = 480;
+        let center_x = content_width / 2;
+
+        self.draw_scrolling_text_line(
+            style_artist,
+            &self.track_artist.clone(),
+            55,
+            70,
+            content_width as u32,
+            center_x,
+            update_scrolling_only,
+        )
+        .await;
+        self.draw_scrolling_text_line(
+            style_title,
+            &self.track_title.clone(),
+            135,
+            70,
+            content_width as u32,
+            center_x,
+            update_scrolling_only,
+        )
+        .await;
+    }
+
+    async fn draw_track_info_internal(&mut self, update_scrolling_only: bool) {
         let style_song = U8g2TextStyle::new(fonts::u8g2_font_helvB24_tf, Rgb666::WHITE);
         let style_artist = U8g2TextStyle::new(fonts::u8g2_font_helvB18_tf, COL_1);
         let style_album = U8g2TextStyle::new(fonts::u8g2_font_helvB18_tf, COL_TEXT);
@@ -509,81 +562,36 @@ where
         let content_width = 480 - (VU_MARGIN_X * 2);
         let center_x = content_width / 2;
 
-        let mut draw_buffered_line =
-            |style: U8g2TextStyle<Rgb666>, text: &str, y: i32, height: u32| {
-                let width = style
-                    .measure_string(text, Point::zero(), Baseline::Middle)
-                    .bounding_box
-                    .size
-                    .width as i32;
-
-                let buffer_slice =
-                    unsafe { &mut LINE_BUFFER[..(content_width as usize * height as usize)] };
-                buffer_slice.fill(COL_BG_BASE);
-
-                let mut target = LineBuffer::new(buffer_slice, content_width as u32, height);
-                let local_y = height as i32 / 2;
-
-                if width <= content_width {
-                    Text::with_text_style(
-                        text,
-                        Point::new(center_x, local_y),
-                        style,
-                        TextStyleBuilder::new()
-                            .alignment(Alignment::Center)
-                            .baseline(Baseline::Middle)
-                            .build(),
-                    )
-                    .draw(&mut target)
-                    .ok();
-                } else {
-                    let gap = 60;
-                    let cycle = width + gap;
-                    let offset = self.scroll_tick % cycle;
-                    let x = 10 - offset;
-
-                    Text::with_text_style(
-                        text,
-                        Point::new(x, local_y),
-                        style.clone(),
-                        TextStyleBuilder::new()
-                            .alignment(Alignment::Left)
-                            .baseline(Baseline::Middle)
-                            .build(),
-                    )
-                    .draw(&mut target)
-                    .ok();
-
-                    if x + width < content_width {
-                        Text::with_text_style(
-                            text,
-                            Point::new(x + cycle, local_y),
-                            style,
-                            TextStyleBuilder::new()
-                                .alignment(Alignment::Left)
-                                .baseline(Baseline::Middle)
-                                .build(),
-                        )
-                        .draw(&mut target)
-                        .ok();
-                    }
-                }
-
-                let screen_top = y - local_y;
-                self.display
-                    .fill_contiguous(
-                        &Rectangle::new(
-                            Point::new(VU_MARGIN_X, screen_top),
-                            Size::new(content_width as u32, height),
-                        ),
-                        target.buffer.iter().cloned(),
-                    )
-                    .ok();
-            };
-
-        draw_buffered_line(style_song, &self.track_title, 90, 50);
-        draw_buffered_line(style_artist, &self.track_artist, 135, 35);
-        draw_buffered_line(style_album, &self.track_album, 180, 45);
+        self.draw_scrolling_text_line(
+            style_song,
+            &self.track_title.clone(),
+            90,
+            50,
+            content_width as u32,
+            center_x,
+            update_scrolling_only,
+        )
+        .await;
+        self.draw_scrolling_text_line(
+            style_artist,
+            &self.track_artist.clone(),
+            135,
+            35,
+            content_width as u32,
+            center_x,
+            update_scrolling_only,
+        )
+        .await;
+        self.draw_scrolling_text_line(
+            style_album,
+            &self.track_album.clone(),
+            180,
+            45,
+            content_width as u32,
+            center_x,
+            update_scrolling_only,
+        )
+        .await;
     }
 
     pub fn draw_vu_meter(&mut self, left: u8, right: u8, volume: u8) {
@@ -913,7 +921,7 @@ where
     }
 
     pub fn draw_large_volume(&mut self, vol: u8) {
-        let width = 200;
+        let width = 350;
         let height = 60;
 
         let buffer_slice = unsafe { &mut LINE_BUFFER[..(width * height) as usize] };
@@ -924,7 +932,8 @@ where
         let style = U8g2TextStyle::new(fonts::u8g2_font_fub42_tf, COL_1);
 
         let mut vol_str = String::<16>::new();
-        write!(&mut vol_str, "{}", vol).unwrap();
+        let db = (vol as f32 - 255.0) / 2.0;
+        write!(&mut vol_str, "{:.1} dB", db).unwrap();
 
         Text::with_text_style(
             &vol_str,
@@ -960,6 +969,7 @@ mod hardware {
     use crate::DisplayResources;
     use defmt_rtt as _;
     use display_interface_spi::SPIInterface;
+    use embassy_futures::yield_now;
     use embassy_rp::gpio::{Level, Output};
     use embassy_rp::spi;
     use embassy_time::{Delay, Instant};
@@ -1069,6 +1079,9 @@ mod hardware {
         }
 
         // Delegates to PlayerDisplay
+
+        // Delegates to PlayerDisplay
+
         pub fn set_display_mode(&mut self, mode: DisplayMode) {
             self.player_display.set_display_mode(mode);
         }
@@ -1093,8 +1106,8 @@ mod hardware {
             self.player_display.draw_volume(vol_db);
         }
 
-        pub fn tick(&mut self) {
-            self.player_display.tick();
+        pub async fn tick(&mut self) {
+            self.player_display.tick().await;
         }
 
         pub fn draw_track_info(&mut self, title: &str, artist: &str, album: &str) {
@@ -1103,6 +1116,10 @@ mod hardware {
 
         pub fn redraw_track_info(&mut self) {
             self.player_display.redraw_track_info();
+        }
+
+        pub fn clear_track_info(&mut self) {
+            self.player_display.clear_track_info();
         }
 
         pub fn draw_vu_meter(&mut self, left: u8, right: u8, volume: u8) {

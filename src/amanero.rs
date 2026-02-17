@@ -88,7 +88,7 @@ pub async fn listen_pin_changes(
     }
 
     loop {
-        match select(
+        select(
             REFRESH_SAMPLE_RATE.wait(),
             select3(
                 amanero.dsd_on.wait_for_any_edge(),
@@ -101,15 +101,11 @@ pub async fn listen_pin_changes(
                 ),
             ),
         )
-        .await
+        .await;
         {
-            _ => {
-                let sample_rate = amanero.read_sample_rate();
-                debug!("amanero send update rate command: {}", sample_rate);
-                if sample_rate != SampleRate::Unknown {
-                    control.send(Command::UpdateSampleRate(sample_rate)).await;
-                }
-            }
+            let sample_rate = amanero.read_sample_rate();
+            debug!("amanero send update rate command: {}", sample_rate);
+            control.send(Command::UpdateSampleRate(sample_rate)).await;
         }
     }
 }
