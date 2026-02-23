@@ -37,6 +37,7 @@ const VU_TOP_Y: i32 = 62;
 // Shared buffer for line drawing to save RAM
 // Note: We use a static mutable buffer. Ensure single-threaded access (tick is sequential).
 static mut LINE_BUFFER: [Rgb666; 480 * 50] = [Rgb666::new(0, 0, 0); 480 * 50];
+const MAX_BUFFER_PIXELS: usize = 480 * 50;
 
 pub struct LineBuffer<'a> {
     buffer: &'a mut [Rgb666],
@@ -104,6 +105,7 @@ pub struct PlayerDisplay<D> {
     track_title: String<64>,
     track_album: String<64>,
     scroll_tick: i32,
+    scroll_accumulator: i32,
     last_total_time: String<16>,
     display_mode: DisplayMode,
     playback_mode: PlaybackMode,
@@ -125,6 +127,7 @@ where
             track_artist: String::new(),
             track_album: String::new(),
             scroll_tick: 0,
+            scroll_accumulator: 0,
             last_total_time: String::new(),
             display_mode: DisplayMode::Normal,
             playback_mode: PlaybackMode::Sequential,
@@ -136,14 +139,21 @@ where
     }
 
     pub async fn tick(&mut self) {
-        self.scroll_tick += 50;
-        let update_scrolling_only = !self.force_redraw;
-        if self.display_mode == DisplayMode::Normal {
-            self.draw_track_info_internal(update_scrolling_only).await;
-        } else if self.display_mode == DisplayMode::BigInfo {
-            self.draw_big_info_internal(update_scrolling_only).await;
+        self.scroll_accumulator += 10;
+        const SCROLL_THRESHOLD: i32 = 25;
+        
+        if self.scroll_accumulator >= SCROLL_THRESHOLD || self.force_redraw {
+            self.scroll_tick += self.scroll_accumulator;
+            self.scroll_accumulator = 0;
+            
+            let update_scrolling_only = !self.force_redraw;
+            if self.display_mode == DisplayMode::Normal {
+                self.draw_track_info_internal(update_scrolling_only).await;
+            } else if self.display_mode == DisplayMode::BigInfo {
+                self.draw_big_info_internal(update_scrolling_only).await;
+            }
+            self.force_redraw = false;
         }
-        self.force_redraw = false;
     }
 
     pub fn set_display_mode(&mut self, mode: DisplayMode) {
@@ -400,11 +410,13 @@ where
         self.track_album.clear();
         self.track_album.push_str(album).ok();
         self.scroll_tick = 0;
+        self.scroll_accumulator = 0;
         self.force_redraw = true;
     }
 
     pub fn redraw_track_info(&mut self) {
         self.scroll_tick = 0;
+        self.scroll_accumulator = 0;
         self.force_redraw = true;
     }
 
@@ -413,6 +425,7 @@ where
         self.track_artist.clear();
         self.track_album.clear();
         self.scroll_tick = 0;
+        self.scroll_accumulator = 0;
         self.force_redraw = true;
     }
 
@@ -436,8 +449,9 @@ where
             return;
         }
 
-        // Split large draw into smaller chunks to allow yielding
-        let chunk_height = 20;
+        // Split large draw into optimal chunks to balance performance and yielding
+        let max_chunk_height = (MAX_BUFFER_PIXELS / content_width as usize) as u32;
+        let chunk_height = height.min(max_chunk_height).max(1);
         let num_chunks = height.div_ceil(chunk_height);
 
         for i in 0..num_chunks {
@@ -521,7 +535,9 @@ where
                 .ok();
 
             #[cfg(target_arch = "arm")]
-            embassy_futures::yield_now().await;
+            if num_chunks > 1 && i < num_chunks - 1 {
+                embassy_futures::yield_now().await;
+            }
         }
     }
 
