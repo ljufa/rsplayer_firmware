@@ -259,7 +259,7 @@ where
                     Point::new(section_width / 2, height as i32 / 2),
                     VerticalPosition::Center,
                     HorizontalAlignment::Center,
-                    FontColor::Transparent(COL_1),
+                    FontColor::Transparent(COL_TEXT),
                     &mut target,
                 )
                 .ok();
@@ -284,7 +284,7 @@ where
 
         let mut target = LineBuffer::new(buffer_slice, section_width as u32, height);
 
-        let style_footer = U8g2TextStyle::new(fonts::u8g2_font_helvB24_tf, COL_1);
+        let style_footer = U8g2TextStyle::new(fonts::u8g2_font_helvB24_tf, COL_TEXT);
 
         Text::with_text_style(
             text,
@@ -594,15 +594,14 @@ where
         .await;
     }
 
-    pub fn draw_vu_meter(&mut self, left: u8, right: u8, volume: u8) {
+    pub fn draw_vu_meter(&mut self, left: u8, right: u8, _volume: u8) {
         if self.display_mode == DisplayMode::BigInfo {
             return;
         }
         let style_bg = embedded_graphics::primitives::PrimitiveStyle::with_fill(COL_BG_BASE);
 
-        let scale = volume as f32 / 255.0;
-        let left_scaled = left as f32 * scale;
-        let right_scaled = right as f32 * scale;
+        let left_scaled = left as f32;
+        let right_scaled = right as f32;
 
         let h_left = (left_scaled / 255.0 * VU_MAX_HEIGHT as f32) as u32;
         let h_right = (right_scaled / 255.0 * VU_MAX_HEIGHT as f32) as u32;
@@ -829,16 +828,15 @@ where
             .ok();
     }
 
-    pub fn draw_fullscreen_vu_meter(&mut self, left: u8, right: u8, volume: u8) {
+    pub fn draw_fullscreen_vu_meter(&mut self, left: u8, right: u8, _volume: u8) {
         let max_width: u32 = 400;
         let bar_height: u32 = 40;
         let start_x: i32 = (480 - max_width as i32) / 2;
         let l_y: i32 = 100;
         let r_y: i32 = 180;
 
-        let scale = volume as f32 / 255.0;
-        let left_scaled = left as f32 * scale;
-        let right_scaled = right as f32 * scale;
+        let left_scaled = left as f32;
+        let right_scaled = right as f32;
 
         let w_left = (left_scaled / 255.0 * max_width as f32) as u32;
         let w_right = (right_scaled / 255.0 * max_width as f32) as u32;
@@ -1122,7 +1120,7 @@ mod hardware {
             self.player_display.clear_track_info();
         }
 
-        pub fn draw_vu_meter(&mut self, left: u8, right: u8, volume: u8) {
+    pub fn draw_vu_meter(&mut self, left: u8, right: u8, volume: u8) {
             self.player_display.draw_vu_meter(left, right, volume);
         }
 
@@ -1147,7 +1145,7 @@ mod hardware {
             self.player_display.clear_main_area();
         }
 
-        pub fn draw_fullscreen_vu_meter(&mut self, left: u8, right: u8, volume: u8) {
+    pub fn draw_fullscreen_vu_meter(&mut self, left: u8, right: u8, volume: u8) {
             self.player_display
                 .draw_fullscreen_vu_meter(left, right, volume);
         }

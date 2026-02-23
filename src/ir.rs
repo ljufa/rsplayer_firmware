@@ -1,5 +1,5 @@
 use defmt::info;
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Sender};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
 use embassy_time::Instant;
 
 use infrared::{protocol::Nec, Receiver};
@@ -12,7 +12,7 @@ use embassy_rp::{
 };
 #[embassy_executor::task]
 pub async fn listen_ir_receiver(
-    control: Sender<'static, ThreadModeRawMutex, Command, 64>,
+    control: Sender<'static, CriticalSectionRawMutex, Command, 64>,
     pin3: Peri<'static, PIN_3>,
 ) {
     let mut ir_pin = Input::new(pin3, Pull::Down);
@@ -98,6 +98,16 @@ pub async fn listen_ir_receiver(
                 78 => {
                     if !cmd.repeat {
                         control.send(Command::ToggleRandomPlay).await
+                    }
+                }
+                187 => {
+                    if !cmd.repeat {
+                        control.send(Command::SeekForward).await
+                    }
+                }
+                189 => {
+                    if !cmd.repeat {
+                        control.send(Command::SeekBackward).await
                     }
                 }
 

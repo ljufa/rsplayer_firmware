@@ -7,13 +7,13 @@ use embassy_rp::{
     pio_programs::rotary_encoder::{Direction, PioEncoder},
     Peri,
 };
-use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::{with_deadline, with_timeout, Duration, Instant, Timer};
 
 #[embassy_executor::task]
 pub async fn listen_rotary_encoder(
-    control: Sender<'static, ThreadModeRawMutex, Command, 64>,
+    control: Sender<'static, CriticalSectionRawMutex, Command, 64>,
     mut encoder: PioEncoder<'static, PIO0, 0>,
 ) {
     loop {
@@ -26,7 +26,7 @@ pub async fn listen_rotary_encoder(
 
 #[embassy_executor::task]
 pub async fn listen_rotary_encoder_button(
-    control: Sender<'static, ThreadModeRawMutex, Command, 64>,
+    control: Sender<'static, CriticalSectionRawMutex, Command, 64>,
     pin: Peri<'static, PIN_21>,
 ) {
     let btn_pin = Input::new(pin, Pull::Up);

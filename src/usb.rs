@@ -1,5 +1,5 @@
 use defmt::{error, info};
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Sender};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
 
 use crate::Command;
 use crate::PlaybackMode;
@@ -8,7 +8,7 @@ use heapless::{String, Vec};
 
 #[embassy_executor::task]
 pub async fn listen_usb_commands(
-    control: Sender<'static, ThreadModeRawMutex, Command, 64>,
+    control: Sender<'static, CriticalSectionRawMutex, Command, 64>,
     mut usb_rx: embassy_usb::class::cdc_acm::Receiver<
         'static,
         embassy_rp::usb::Driver<'static, embassy_rp::peripherals::USB>,
@@ -44,6 +44,10 @@ pub async fn listen_usb_commands(
                                     }
                                 } else if received_str.starts_with("QueryCurVolume") {
                                     control.send(Command::QueryCurrentVolume).await;
+                                } else if received_str == "PowerOn" {
+                                    control.send(Command::PowerOn).await;
+                                } else if received_str == "PowerOff" {
+                                    control.send(Command::PowerOff).await;
                                 } else if received_str == "VolUp" {
                                     control.send(Command::VolumeUp).await;
                                 } else if received_str == "VolDown" {

@@ -23,7 +23,7 @@ use embassy_executor::Executor;
 
 use embassy_rp::multicore::{spawn_core1, Stack};
 use embassy_rp::Peri;
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::UsbDevice;
@@ -138,6 +138,8 @@ enum Command {
     },
     UpdatePlaybackMode(PlaybackMode),
     TogglePower,
+    PowerOn,
+    PowerOff,
     VolumeUp,
     VolumeDown,
     SetVolume(u8),
@@ -145,6 +147,8 @@ enum Command {
 
     Next,
     Prev,
+    SeekForward,
+    SeekBackward,
     TogglePlay,
     NextDacSoundSetting,
     NextDacFilterType,
@@ -156,7 +160,7 @@ enum Command {
     ToggleDisplayMode,
 }
 
-static CMD_CHANNEL: Channel<ThreadModeRawMutex, Command, 64> = Channel::new();
+static CMD_CHANNEL: Channel<CriticalSectionRawMutex, Command, 64> = Channel::new();
 static mut CORE1_STACK: Stack<8096> = Stack::new();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
@@ -344,7 +348,7 @@ pub async fn process_commands(
             Either::First(c) => c,
             Either::Second(_) => {
                 if let Some(start) = silence_start_time {
-                    if start.elapsed().as_secs() > 30 {
+                    if start.elapsed().as_secs() > 50 {
                         if let Some(disp) = DISPLAY.lock().await.as_mut() {
                             disp.clear_track_info();
                             disp.draw_footer("", "", "");
@@ -357,7 +361,7 @@ pub async fn process_commands(
         };
 
         let is_power_on = POWER_ON.load(core::sync::atomic::Ordering::SeqCst);
-        if cmd != Command::TogglePower && !is_power_on {
+        if cmd != Command::TogglePower && cmd != Command::PowerOn && !is_power_on {
             info!("Power is off, ignoring command");
             continue;
         }
@@ -405,9 +409,15 @@ pub async fn process_commands(
                     }
                 }
             }
-            Command::TogglePower => {
+            c @ (Command::TogglePower | Command::PowerOn | Command::PowerOff) => {
                 let is_power_on = POWER_ON.load(core::sync::atomic::Ordering::SeqCst);
-                if !is_power_on {
+                let should_turn_on = match c {
+                    Command::TogglePower => !is_power_on,
+                    Command::PowerOn => true,
+                    Command::PowerOff => false,
+                    _ => unreachable!(),
+                };
+                if should_turn_on && !is_power_on {
                     pwr_psu_relay.set_high();
                     Timer::after_millis(1000).await;
 
@@ -453,7 +463,8 @@ pub async fn process_commands(
                     }
                     disp.draw_footer("", "", "");
                     // rsplayer.send_command("QueryCurrentPlayerInfo").await;
-                } else {
+                } else if !should_turn_on && is_power_on {
+                    POWER_ON.store(false, core::sync::atomic::Ordering::SeqCst);
                     debug!("Powering off");
                     mute_out_relay.set_low();
 
@@ -463,7 +474,6 @@ pub async fn process_commands(
                     Timer::after_millis(200).await;
 
                     pwr_psu_relay.set_low();
-                    POWER_ON.store(false, core::sync::atomic::Ordering::SeqCst);
                     last_sample_rate = None;
                     debug!("Powered off");
                 }
@@ -514,7 +524,6 @@ pub async fn process_commands(
                         }
                     }
                 }
-                rsplayer.send_current_volume(vol).await;
             }
             Command::ToggleRandomPlay => {
                 info!("got CyclePlaybackMode");
@@ -570,6 +579,12 @@ pub async fn process_commands(
             }
             Command::Prev => {
                 rsplayer.send_command("Prev").await;
+            }
+            Command::SeekForward => {
+                rsplayer.send_command("SeekForward").await;
+            }
+            Command::SeekBackward => {
+                rsplayer.send_command("SeekBackward").await;
             }
             Command::TogglePlay => {
                 rsplayer.send_command("TogglePlay").await;

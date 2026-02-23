@@ -1,9 +1,8 @@
 use defmt::debug;
 use embassy_futures::select::{select, select3, select4};
 use embassy_rp::gpio::Input;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Sender};
 use embassy_sync::signal::Signal;
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Sender};
 use embassy_time::Timer;
 
 use crate::dac::common::SampleRate;
@@ -75,7 +74,7 @@ impl Amanero {
 }
 #[embassy_executor::task]
 pub async fn listen_pin_changes(
-    control: Sender<'static, ThreadModeRawMutex, Command, 64>,
+    control: Sender<'static, CriticalSectionRawMutex, Command, 64>,
     mut amanero: Amanero,
 ) {
     Timer::after_millis(500).await;
