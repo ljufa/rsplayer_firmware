@@ -51,4 +51,12 @@ impl RsPlayer {
         info!("Sending command: {}", buff.as_str());
         self.send_command(buff.as_str()).await;
     }
+
+    pub async fn send_power_state(&mut self, is_on: bool) {
+        let buff = &mut FmtBuf::new();
+        let state = if is_on { 1 } else { 0 };
+        _ = write!(buff, "PowerState={}", state);
+        info!("Sending power state: {}", buff.as_str());
+        self.send_command(buff.as_str()).await;
+    }
 }

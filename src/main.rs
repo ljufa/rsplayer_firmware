@@ -462,6 +462,7 @@ pub async fn process_commands(
                         }
                     }
                     disp.draw_footer("", "", "");
+                    rsplayer.send_power_state(true).await;
                     // rsplayer.send_command("QueryCurrentPlayerInfo").await;
                 } else if !should_turn_on && is_power_on {
                     POWER_ON.store(false, core::sync::atomic::Ordering::SeqCst);
@@ -475,6 +476,7 @@ pub async fn process_commands(
 
                     pwr_psu_relay.set_low();
                     last_sample_rate = None;
+                    rsplayer.send_power_state(false).await;
                     debug!("Powered off");
                 }
             }
