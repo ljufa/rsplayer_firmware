@@ -300,7 +300,7 @@ pub async fn tick_display() {
                 disp.tick().await;
             }
         }
-        Timer::after_millis(1000).await;
+        Timer::after_millis(350).await;
     }
 }
 

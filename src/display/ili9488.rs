@@ -139,8 +139,8 @@ where
     }
 
     pub async fn tick(&mut self) {
-        self.scroll_accumulator += 10;
-        const SCROLL_THRESHOLD: i32 = 25;
+        self.scroll_accumulator += 4; // Move 4 pixels per tick (at 50ms = 80px/sec)
+        const SCROLL_THRESHOLD: i32 = 4;
         
         if self.scroll_accumulator >= SCROLL_THRESHOLD || self.force_redraw {
             self.scroll_tick += self.scroll_accumulator;
@@ -450,7 +450,8 @@ where
         }
 
         // Split large draw into optimal chunks to balance performance and yielding
-        let max_chunk_height = (MAX_BUFFER_PIXELS / content_width as usize) as u32;
+        // Artificially restrict chunk height to 8 lines so we yield frequently and don't block the CPU
+        let max_chunk_height = 8;
         let chunk_height = height.min(max_chunk_height).max(1);
         let num_chunks = height.div_ceil(chunk_height);
 
@@ -535,9 +536,7 @@ where
                 .ok();
 
             #[cfg(target_arch = "arm")]
-            if num_chunks > 1 && i < num_chunks - 1 {
-                embassy_futures::yield_now().await;
-            }
+            embassy_futures::yield_now().await;
         }
     }
 
@@ -982,13 +981,12 @@ mod hardware {
     use super::*;
     use crate::DisplayResources;
     use defmt_rtt as _;
-    use display_interface_spi::SPIInterface;
+    use mipidsi::interface::SpiInterface;
     use embassy_futures::yield_now;
     use embassy_rp::gpio::{Level, Output};
     use embassy_rp::spi;
     use embassy_time::{Delay, Instant};
     use embedded_hal_bus::spi::ExclusiveDevice;
-    use ili9488_rs::{Ili9488, Orientation, Rgb666Mode};
 
     struct DummyCs;
     impl embedded_hal_1::digital::OutputPin for DummyCs {
@@ -1010,7 +1008,7 @@ mod hardware {
     >;
 
     type Display =
-        Ili9488<SPIInterface<SpiDeviceDisp, Output<'static>>, Output<'static>, Rgb666Mode>;
+        mipidsi::Display<SpiInterface<'static, SpiDeviceDisp, Output<'static>>, mipidsi::models::ILI9488Rgb666, Output<'static>>;
 
     struct DisplayWrapper(Display);
 
@@ -1049,6 +1047,8 @@ mod hardware {
         pub last_update: Instant,
     }
 
+    static mut MII_BUFFER: [u8; 512] = [0; 512];
+
     impl OledDisplay {
         pub fn new(disp_res: DisplayResources) -> Self {
             let dc = Output::new(disp_res.pin7_spi_dc, Level::Low);
@@ -1065,14 +1065,18 @@ mod hardware {
             );
             let spi_dev = ExclusiveDevice::new(spi_disp, DummyCs, Delay);
 
-            let di = SPIInterface::new(spi_dev, dc);
+            let buffer = unsafe { &mut MII_BUFFER };
+            let di = SpiInterface::new(spi_dev, dc, buffer);
 
-            let mut disp = Ili9488::new(di, rst, &mut Delay, Orientation::Landscape, Rgb666Mode)
+            let mut disp = mipidsi::Builder::new(mipidsi::models::ILI9488Rgb666, di)
+                .reset_pin(rst)
+                .init(&mut Delay)
                 .expect("could not init display");
+                
+            disp.set_orientation(mipidsi::options::Orientation::new().rotate(mipidsi::options::Rotation::Deg270).flip_horizontal()).unwrap();
 
-            disp.clear_screen_fast(ili9488_rs::Rgb111::BLACK)
+            disp.clear(Rgb666::BLACK)
                 .expect("could not clear display");
-            disp.brightness(150).unwrap();
 
             let wrapper = DisplayWrapper(disp);
             let player = PlayerDisplay::new(wrapper);
