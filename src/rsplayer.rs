@@ -1,26 +1,27 @@
-use core::fmt::Write;
-use defmt::{debug, error, info};
+use defmt::{debug, error};
 use embassy_rp::{peripherals::USB, usb::Driver};
 use embassy_time::{with_timeout, Duration};
 use embassy_usb::class::cdc_acm::Sender;
-
-use crate::fmtbuf::FmtBuf;
+use rsplayer_wire::{FwPlayerCmd, FwToHost, MAX_FRAME};
 
 pub struct RsPlayer {
     usb_sender: Sender<'static, Driver<'static, USB>>,
 }
+
 impl RsPlayer {
     pub fn new(usb_sender: Sender<'static, Driver<'static, USB>>) -> Self {
         RsPlayer { usb_sender }
     }
-    pub async fn send_command(&mut self, cmd: &str) {
-        if cmd.len() > 64 {
-            error!("Command [{}] too long", cmd);
-            return;
-        }
-        let buff = &mut FmtBuf::new();
-        _ = writeln!(buff, "{}", cmd);
-        debug!("Sending command: {}", buff.as_str());
+
+    pub async fn send(&mut self, msg: &FwToHost) {
+        let mut buf = [0u8; MAX_FRAME];
+        let frame = match postcard::to_slice_cobs(msg, &mut buf) {
+            Ok(f) => f,
+            Err(_) => {
+                error!("postcard encode failed");
+                return;
+            }
+        };
 
         if with_timeout(
             Duration::from_millis(100),
@@ -29,34 +30,40 @@ impl RsPlayer {
         .await
         .is_err()
         {
-            debug!("USB not connected (timeout), skipping command sending");
+            debug!("USB not connected (timeout), skipping");
             return;
         }
 
-        match with_timeout(
-            Duration::from_millis(500),
-            self.usb_sender.write_packet(buff.as_str().as_bytes()),
-        )
-        .await
-        {
-            Ok(Ok(_)) => debug!("Write packet success"),
-            Ok(Err(e)) => error!("Failed to write packet: {}", e),
-            Err(_) => error!("Write packet timed out"),
+        // Frame is at most MAX_FRAME bytes; chunk into max 64-byte USB packets.
+        for chunk in frame.chunks(64) {
+            match with_timeout(
+                Duration::from_millis(500),
+                self.usb_sender.write_packet(chunk),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    error!("Failed to write packet: {}", e);
+                    return;
+                }
+                Err(_) => {
+                    error!("Write packet timed out");
+                    return;
+                }
+            }
         }
     }
 
+    pub async fn send_player(&mut self, cmd: FwPlayerCmd) {
+        self.send(&FwToHost::Player(cmd)).await;
+    }
+
     pub async fn send_current_volume(&mut self, vol: u8) {
-        let buff = &mut FmtBuf::new();
-        _ = write!(buff, "CurVolume={}", vol);
-        info!("Sending command: {}", buff.as_str());
-        self.send_command(buff.as_str()).await;
+        self.send(&FwToHost::Volume(vol)).await;
     }
 
     pub async fn send_power_state(&mut self, is_on: bool) {
-        let buff = &mut FmtBuf::new();
-        let state = if is_on { 1 } else { 0 };
-        _ = write!(buff, "PowerState={}", state);
-        info!("Sending power state: {}", buff.as_str());
-        self.send_command(buff.as_str()).await;
+        self.send(&FwToHost::Power(is_on)).await;
     }
 }

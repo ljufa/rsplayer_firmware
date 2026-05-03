@@ -37,13 +37,8 @@ use embassy_rp::peripherals::PIO0;
 use crate::dac::common::{Akm44xxDac, FilterType};
 use dac::common::SampleRate;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, defmt::Format)]
-pub enum PlaybackMode {
-    Sequential,
-    Random,
-    LoopSingle,
-    LoopQueue,
-}
+pub use rsplayer_wire::PlaybackMode;
+use rsplayer_wire::FwPlayerCmd;
 // Only one of these will be active based on the feature flag
 #[cfg(feature = "debug")]
 use defmt_rtt as _;
@@ -58,7 +53,6 @@ mod display;
 
 mod amanero;
 mod flash;
-mod fmtbuf;
 // mod gpio;
 mod i2c_helper;
 mod ir;
@@ -119,7 +113,7 @@ assign_resources! {
 
 static DISPLAY: Mutex<CriticalSectionRawMutex, Option<OledDisplay>> = Mutex::new(None);
 
-#[derive(Eq, PartialEq, PartialOrd, Debug)]
+#[derive(Eq, PartialEq, Debug)]
 enum Command {
     UpdateSampleRate(SampleRate),
     UpdateTrackInfo {
@@ -529,7 +523,7 @@ pub async fn process_commands(
             }
             Command::ToggleRandomPlay => {
                 info!("got CyclePlaybackMode");
-                rsplayer.send_command("CyclePlaybackMode").await;
+                rsplayer.send_player(FwPlayerCmd::CyclePlaybackMode).await;
             }
             Command::ToggleInput => {
                 mute_out_relay.set_low();
@@ -564,7 +558,7 @@ pub async fn process_commands(
                     disp.clear_track_info();
                     disp.draw_header_status(current_input, current_filter);
                     disp.draw_playback_mode(PlaybackMode::Sequential);
-                    rsplayer.send_command("Stop").await;
+                    rsplayer.send_player(FwPlayerCmd::Stop).await;
                     dac.dsd_pcm(SampleRate::Pcm441).await;
                     if display_mode == DisplayMode::Normal {
                         disp.draw_large_volume(current_volume);
@@ -577,19 +571,19 @@ pub async fn process_commands(
             }
 
             Command::Next => {
-                rsplayer.send_command("Next").await;
+                rsplayer.send_player(FwPlayerCmd::Next).await;
             }
             Command::Prev => {
-                rsplayer.send_command("Prev").await;
+                rsplayer.send_player(FwPlayerCmd::Prev).await;
             }
             Command::SeekForward => {
-                rsplayer.send_command("SeekForward").await;
+                rsplayer.send_player(FwPlayerCmd::SeekForward).await;
             }
             Command::SeekBackward => {
-                rsplayer.send_command("SeekBackward").await;
+                rsplayer.send_player(FwPlayerCmd::SeekBackward).await;
             }
             Command::TogglePlay => {
-                rsplayer.send_command("TogglePlay").await;
+                rsplayer.send_player(FwPlayerCmd::TogglePlay).await;
             }
             Command::NextDacFilterType => {
                 info!("got NextDacFilterType");
