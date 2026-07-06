@@ -34,10 +34,11 @@ const VU_WIDTH: u32 = 10;
 const VU_MAX_HEIGHT: u32 = 202;
 const VU_TOP_Y: i32 = 62;
 
-// Shared buffer for line drawing to save RAM
+// Shared buffer for line drawing to save RAM. Sized for the tallest region
+// drawn in one blit: a BigInfo scrolling text strip (480×70) — scroll strips
+// must blit atomically or the panel shows sheared text mid-update.
 // Note: We use a static mutable buffer. Ensure single-threaded access (tick is sequential).
-static mut LINE_BUFFER: [Rgb666; 480 * 50] = [Rgb666::new(0, 0, 0); 480 * 50];
-const MAX_BUFFER_PIXELS: usize = 480 * 50;
+static mut LINE_BUFFER: [Rgb666; 480 * 70] = [Rgb666::new(0, 0, 0); 480 * 70];
 
 pub struct LineBuffer<'a> {
     buffer: &'a mut [Rgb666],
@@ -113,6 +114,11 @@ pub struct PlayerDisplay<D> {
     footer_freq: String<16>,
     footer_bit_depth: String<16>,
     force_redraw: bool,
+    /// Last drawn side VU bar heights (px). `None` forces a full bar
+    /// repaint; otherwise only the span between old and new level is drawn.
+    last_vu_side: Option<(u32, u32)>,
+    /// Last drawn fullscreen VU bar widths (px), same delta scheme.
+    last_vu_full: Option<(u32, u32)>,
 }
 
 impl<D> PlayerDisplay<D>
@@ -135,17 +141,19 @@ where
             footer_freq: String::new(),
             footer_bit_depth: String::new(),
             force_redraw: false,
+            last_vu_side: None,
+            last_vu_full: None,
         }
     }
 
     pub async fn tick(&mut self) {
         self.scroll_accumulator += 4; // Move 4 pixels per tick (at 50ms = 80px/sec)
         const SCROLL_THRESHOLD: i32 = 4;
-        
+
         if self.scroll_accumulator >= SCROLL_THRESHOLD || self.force_redraw {
             self.scroll_tick += self.scroll_accumulator;
             self.scroll_accumulator = 0;
-            
+
             let update_scrolling_only = !self.force_redraw;
             if self.display_mode == DisplayMode::Normal {
                 self.draw_track_info_internal(update_scrolling_only).await;
@@ -156,11 +164,26 @@ where
         }
     }
 
+    /// Restarts the scroll animation from position zero.
+    fn reset_scroll(&mut self) {
+        self.scroll_tick = 0;
+        self.scroll_accumulator = 0;
+    }
+
     pub fn set_display_mode(&mut self, mode: DisplayMode) {
         self.display_mode = mode;
+        self.invalidate_vu();
+    }
+
+    /// Forget the last drawn VU levels — call after painting over a meter
+    /// area so the next VU frame repaints the bars fully.
+    fn invalidate_vu(&mut self) {
+        self.last_vu_side = None;
+        self.last_vu_full = None;
     }
 
     pub fn draw_background(&mut self) {
+        self.invalidate_vu();
         Rectangle::new(Point::new(0, 0), self.display.size())
             .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
                 COL_BG_BASE,
@@ -409,14 +432,12 @@ where
         self.track_artist.push_str(artist).ok();
         self.track_album.clear();
         self.track_album.push_str(album).ok();
-        self.scroll_tick = 0;
-        self.scroll_accumulator = 0;
+        self.reset_scroll();
         self.force_redraw = true;
     }
 
     pub fn redraw_track_info(&mut self) {
-        self.scroll_tick = 0;
-        self.scroll_accumulator = 0;
+        self.reset_scroll();
         self.force_redraw = true;
     }
 
@@ -424,8 +445,7 @@ where
         self.track_title.clear();
         self.track_artist.clear();
         self.track_album.clear();
-        self.scroll_tick = 0;
-        self.scroll_accumulator = 0;
+        self.reset_scroll();
         self.force_redraw = true;
     }
 
@@ -449,51 +469,51 @@ where
             return;
         }
 
-        // Split large draw into optimal chunks to balance performance and yielding
-        // Artificially restrict chunk height to 8 lines so we yield frequently and don't block the CPU
-        let max_chunk_height = 8;
-        let chunk_height = height.min(max_chunk_height).max(1);
-        let num_chunks = height.div_ceil(chunk_height);
+        // Render the whole strip and blit it in ONE transfer: chunked blits
+        // (the previous 8-row scheme) let the panel display a mix of old and
+        // new scroll offsets mid-update — visible as sheared, ghosting text.
+        let buffer_slice =
+            unsafe { &mut LINE_BUFFER[..(content_width as usize * height as usize)] };
+        buffer_slice.fill(COL_BG_BASE);
 
-        for i in 0..num_chunks {
-            let chunk_y_start = i * chunk_height;
-            let current_chunk_height = if i == num_chunks - 1 {
-                height - chunk_y_start
-            } else {
-                chunk_height
-            };
+        let mut target = LineBuffer::new(buffer_slice, content_width, height);
+        let local_y = height as i32 / 2;
 
-            let buffer_slice = unsafe {
-                &mut LINE_BUFFER[..(content_width as usize * current_chunk_height as usize)]
-            };
-            buffer_slice.fill(COL_BG_BASE);
+        if width <= content_width as i32 {
+            Text::with_text_style(
+                text,
+                Point::new(center_x, local_y),
+                style,
+                TextStyleBuilder::new()
+                    .alignment(Alignment::Center)
+                    .baseline(Baseline::Middle)
+                    .build(),
+            )
+            .draw(&mut target)
+            .ok();
+        } else {
+            let gap = 60;
+            let cycle = width + gap;
+            let offset = self.scroll_tick % cycle;
+            let x = 10 - offset;
 
-            let mut target =
-                LineBuffer::new(buffer_slice, content_width, current_chunk_height);
-            let local_y = (height as i32 / 2) - chunk_y_start as i32;
+            Text::with_text_style(
+                text,
+                Point::new(x, local_y),
+                style.clone(),
+                TextStyleBuilder::new()
+                    .alignment(Alignment::Left)
+                    .baseline(Baseline::Middle)
+                    .build(),
+            )
+            .draw(&mut target)
+            .ok();
 
-            if width <= content_width as i32 {
+            if x + width < content_width as i32 {
                 Text::with_text_style(
                     text,
-                    Point::new(center_x, local_y),
-                    style.clone(),
-                    TextStyleBuilder::new()
-                        .alignment(Alignment::Center)
-                        .baseline(Baseline::Middle)
-                        .build(),
-                )
-                .draw(&mut target)
-                .ok();
-            } else {
-                let gap = 60;
-                let cycle = width + gap;
-                let offset = self.scroll_tick % cycle;
-                let x = 10 - offset;
-
-                Text::with_text_style(
-                    text,
-                    Point::new(x, local_y),
-                    style.clone(),
+                    Point::new(x + cycle, local_y),
+                    style,
                     TextStyleBuilder::new()
                         .alignment(Alignment::Left)
                         .baseline(Baseline::Middle)
@@ -501,43 +521,30 @@ where
                 )
                 .draw(&mut target)
                 .ok();
-
-                if x + width < content_width as i32 {
-                    Text::with_text_style(
-                        text,
-                        Point::new(x + cycle, local_y),
-                        style.clone(),
-                        TextStyleBuilder::new()
-                            .alignment(Alignment::Left)
-                            .baseline(Baseline::Middle)
-                            .build(),
-                    )
-                    .draw(&mut target)
-                    .ok();
-                }
             }
-
-            let screen_top = y - (height as i32 / 2) + chunk_y_start as i32;
-            self.display
-                .fill_contiguous(
-                    &Rectangle::new(
-                        Point::new(
-                            if self.display_mode == DisplayMode::Normal {
-                                VU_MARGIN_X
-                            } else {
-                                0
-                            },
-                            screen_top,
-                        ),
-                        Size::new(content_width, current_chunk_height),
-                    ),
-                    target.buffer.iter().cloned(),
-                )
-                .ok();
-
-            #[cfg(target_arch = "arm")]
-            embassy_futures::yield_now().await;
         }
+
+        self.display
+            .fill_contiguous(
+                &Rectangle::new(
+                    Point::new(
+                        if self.display_mode == DisplayMode::Normal {
+                            VU_MARGIN_X
+                        } else {
+                            0
+                        },
+                        y - (height as i32 / 2),
+                    ),
+                    Size::new(content_width, height),
+                ),
+                target.buffer.iter().cloned(),
+            )
+            .ok();
+
+        // One yield per line keeps USB and command handling responsive
+        // between the ~10-20ms blits.
+        #[cfg(target_arch = "arm")]
+        embassy_futures::yield_now().await;
     }
 
     async fn draw_big_info_internal(&mut self, update_scrolling_only: bool) {
@@ -613,72 +620,49 @@ where
         if self.display_mode == DisplayMode::BigInfo {
             return;
         }
-        let style_bg = embedded_graphics::primitives::PrimitiveStyle::with_fill(COL_BG_BASE);
+        let h_left = (f32::from(left) / 255.0 * VU_MAX_HEIGHT as f32) as u32;
+        let h_right = (f32::from(right) / 255.0 * VU_MAX_HEIGHT as f32) as u32;
 
-        let left_scaled = left as f32;
-        let right_scaled = right as f32;
+        // Delta drawing: only the span between the previous and current
+        // level is repainted — a full 2×10×202 px repaint at the 20 Hz VU
+        // rate would keep the SPI bus needlessly busy.
+        let prev = self.last_vu_side;
+        self.last_vu_side = Some((h_left, h_right));
+        match prev {
+            None => {
+                self.draw_vert_vu_span(0, 0, VU_MAX_HEIGHT, h_left);
+                self.draw_vert_vu_span(480 - VU_WIDTH as i32, 0, VU_MAX_HEIGHT, h_right);
+            }
+            Some((old_l, old_r)) => {
+                self.draw_vert_vu_span(0, old_l.min(h_left), old_l.max(h_left), h_left);
+                self.draw_vert_vu_span(480 - VU_WIDTH as i32, old_r.min(h_right), old_r.max(h_right), h_right);
+            }
+        }
+    }
 
-        let h_left = (left_scaled / 255.0 * VU_MAX_HEIGHT as f32) as u32;
-        let h_right = (right_scaled / 255.0 * VU_MAX_HEIGHT as f32) as u32;
-
+    /// Repaints rows `from..to` (px above the bar's bottom) of one vertical
+    /// VU bar at `x`, filled up to `level`: zone colors below the level,
+    /// background above it.
+    fn draw_vert_vu_span(&mut self, x: i32, from: u32, to: u32, level: u32) {
         let green_limit = (VU_MAX_HEIGHT as f32 * 0.7) as u32;
         let orange_limit = (VU_MAX_HEIGHT as f32 * 0.9) as u32;
-
-        let mut draw_vert_bar = |x: i32, current_height: u32| {
-            let empty_h = VU_MAX_HEIGHT - current_height;
-            if empty_h > 0 {
-                Rectangle::new(Point::new(x, VU_TOP_Y), Size::new(VU_WIDTH, empty_h))
-                    .into_styled(style_bg)
+        let bottom_y = VU_TOP_Y + VU_MAX_HEIGHT as i32;
+        let zones = [
+            (0, green_limit.min(level), COL_1),
+            (green_limit.min(level), orange_limit.min(level), COL_TEXT),
+            (orange_limit.min(level), level, COL_VU_MAX),
+            (level, VU_MAX_HEIGHT, COL_BG_BASE),
+        ];
+        for (z_start, z_end, color) in zones {
+            let s = from.max(z_start);
+            let e = to.min(z_end);
+            if e > s {
+                Rectangle::new(Point::new(x, bottom_y - e as i32), Size::new(VU_WIDTH, e - s))
+                    .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(color))
                     .draw(&mut self.display)
                     .ok();
             }
-
-            let bottom_y = VU_TOP_Y + VU_MAX_HEIGHT as i32;
-
-            let cyan_h = current_height.min(green_limit);
-            if cyan_h > 0 {
-                Rectangle::new(
-                    Point::new(x, bottom_y - cyan_h as i32),
-                    Size::new(VU_WIDTH, cyan_h),
-                )
-                .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
-                    COL_1,
-                ))
-                .draw(&mut self.display)
-                .ok();
-            }
-
-            if current_height > green_limit {
-                let yellow_h = current_height.min(orange_limit) - green_limit;
-                let yellow_bottom = bottom_y - green_limit as i32;
-                Rectangle::new(
-                    Point::new(x, yellow_bottom - yellow_h as i32),
-                    Size::new(VU_WIDTH, yellow_h),
-                )
-                .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
-                    COL_TEXT,
-                ))
-                .draw(&mut self.display)
-                .ok();
-            }
-
-            if current_height > orange_limit {
-                let green_h = current_height - orange_limit;
-                let green_bottom = bottom_y - orange_limit as i32;
-                Rectangle::new(
-                    Point::new(x, green_bottom - green_h as i32),
-                    Size::new(VU_WIDTH, green_h),
-                )
-                .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
-                    COL_VU_MAX,
-                ))
-                .draw(&mut self.display)
-                .ok();
-            }
-        };
-
-        draw_vert_bar(0, h_left);
-        draw_vert_bar(480 - VU_WIDTH as i32, h_right);
+        }
     }
 
     pub fn draw_bar(&mut self, progress: f32) {
@@ -808,6 +792,7 @@ where
     }
 
     pub fn draw_powered_off(&mut self) {
+        self.invalidate_vu();
         let font_huge = FontRenderer::new::<fonts::u8g2_font_fub42_tf>();
 
         Rectangle::new(Point::new(0, 0), self.display.size())
@@ -828,6 +813,7 @@ where
     }
 
     pub fn clear_main_area(&mut self) {
+        self.invalidate_vu();
         let y_start = if self.display_mode == DisplayMode::BigInfo {
             0
         } else {
@@ -844,78 +830,55 @@ where
     }
 
     pub fn draw_fullscreen_vu_meter(&mut self, left: u8, right: u8, _volume: u8) {
-        let max_width: u32 = 400;
-        let bar_height: u32 = 40;
-        let start_x: i32 = (480 - max_width as i32) / 2;
-        let l_y: i32 = 100;
-        let r_y: i32 = 180;
+        const MAX_WIDTH: u32 = 400;
+        const L_Y: i32 = 100;
+        const R_Y: i32 = 180;
 
-        let left_scaled = left as f32;
-        let right_scaled = right as f32;
+        let w_left = (f32::from(left) / 255.0 * MAX_WIDTH as f32) as u32;
+        let w_right = (f32::from(right) / 255.0 * MAX_WIDTH as f32) as u32;
 
-        let w_left = (left_scaled / 255.0 * max_width as f32) as u32;
-        let w_right = (right_scaled / 255.0 * max_width as f32) as u32;
+        // Delta drawing: a full repaint is 2×400×40 px per frame — ~19 ms of
+        // SPI time, ~40% duty at the 20 Hz VU rate. Only the span between
+        // the previous and current level actually changes.
+        let prev = self.last_vu_full;
+        self.last_vu_full = Some((w_left, w_right));
+        match prev {
+            None => {
+                self.draw_horiz_vu_span(L_Y, 0, MAX_WIDTH, w_left);
+                self.draw_horiz_vu_span(R_Y, 0, MAX_WIDTH, w_right);
+            }
+            Some((old_l, old_r)) => {
+                self.draw_horiz_vu_span(L_Y, old_l.min(w_left), old_l.max(w_left), w_left);
+                self.draw_horiz_vu_span(R_Y, old_r.min(w_right), old_r.max(w_right), w_right);
+            }
+        }
+    }
 
-        let green_limit = (max_width as f32 * 0.7) as u32;
-        let orange_limit = (max_width as f32 * 0.9) as u32;
-
-        // Use a single buffer for drawing one bar. 400x40 = 16000 pixels.
-        // LINE_BUFFER is 480x50 = 24000 pixels, so it fits.
-
-        let mut draw_horiz_bar = |y: i32, current_width: u32| {
-            let buffer_slice = unsafe { &mut LINE_BUFFER[..(max_width * bar_height) as usize] };
-            // Clear background
-            buffer_slice.fill(Rgb666::CSS_DIM_GRAY);
-
-            let mut target = LineBuffer::new(buffer_slice, max_width, bar_height);
-
-            let cyan_w = current_width.min(green_limit);
-            if cyan_w > 0 {
-                Rectangle::new(Point::new(0, 0), Size::new(cyan_w, bar_height))
-                    .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
-                        COL_1,
-                    ))
-                    .draw(&mut target)
+    /// Repaints columns `from..to` (px from the bar's left edge) of one
+    /// fullscreen VU bar at `y`, filled up to `level`: zone colors below the
+    /// level, dim background beyond it.
+    fn draw_horiz_vu_span(&mut self, y: i32, from: u32, to: u32, level: u32) {
+        const MAX_WIDTH: u32 = 400;
+        const BAR_HEIGHT: u32 = 40;
+        const START_X: i32 = (480 - MAX_WIDTH as i32) / 2;
+        let green_limit = (MAX_WIDTH as f32 * 0.7) as u32;
+        let orange_limit = (MAX_WIDTH as f32 * 0.9) as u32;
+        let zones = [
+            (0, green_limit.min(level), COL_1),
+            (green_limit.min(level), orange_limit.min(level), COL_TEXT),
+            (orange_limit.min(level), level, COL_VU_MAX),
+            (level, MAX_WIDTH, Rgb666::CSS_DIM_GRAY),
+        ];
+        for (z_start, z_end, color) in zones {
+            let s = from.max(z_start);
+            let e = to.min(z_end);
+            if e > s {
+                Rectangle::new(Point::new(START_X + s as i32, y), Size::new(e - s, BAR_HEIGHT))
+                    .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(color))
+                    .draw(&mut self.display)
                     .ok();
             }
-
-            if current_width > green_limit {
-                let yellow_w = current_width.min(orange_limit) - green_limit;
-                Rectangle::new(
-                    Point::new(green_limit as i32, 0),
-                    Size::new(yellow_w, bar_height),
-                )
-                .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
-                    COL_TEXT,
-                ))
-                .draw(&mut target)
-                .ok();
-            }
-
-            if current_width > orange_limit {
-                let green_w = current_width - orange_limit;
-                Rectangle::new(
-                    Point::new(orange_limit as i32, 0),
-                    Size::new(green_w, bar_height),
-                )
-                .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
-                    COL_VU_MAX,
-                ))
-                .draw(&mut target)
-                .ok();
-            }
-
-            // Blit the whole bar at once
-            self.display
-                .fill_contiguous(
-                    &Rectangle::new(Point::new(start_x, y), Size::new(max_width, bar_height)),
-                    target.buffer.iter().cloned(),
-                )
-                .ok();
-        };
-
-        draw_horiz_bar(l_y, w_left);
-        draw_horiz_bar(r_y, w_right);
+        }
     }
 
     pub fn draw_fullscreen_vu_labels(&mut self) {
@@ -1047,7 +1010,11 @@ mod hardware {
         pub last_update: Instant,
     }
 
-    static mut MII_BUFFER: [u8; 512] = [0; 512];
+    /// SPI pixel-staging buffer for the mipidsi interface — pixels are
+    /// converted into it and flushed chunk by chunk, so a bigger buffer
+    /// means fewer blocking writes per blit. `OledDisplay` is constructed
+    /// once, so the cell's single `init` never panics.
+    static MII_BUFFER: static_cell::StaticCell<[u8; 4096]> = static_cell::StaticCell::new();
 
     impl OledDisplay {
         pub fn new(disp_res: DisplayResources) -> Self {
@@ -1055,6 +1022,9 @@ mod hardware {
             let rst = Output::new(disp_res.pin20_spi_rst, Level::Low);
 
             let mut config = spi::Config::default();
+            // 2× over the ILI9488's 20 MHz spec already; 62.5 MHz (RP2040
+            // max) was tried 2026-07 and the panel failed to even
+            // initialize (white screen) — do not raise this again.
             config.frequency = 40_000_000;
             let spi_disp = spi::Spi::new_txonly(
                 disp_res.spi0,
@@ -1065,7 +1035,7 @@ mod hardware {
             );
             let spi_dev = ExclusiveDevice::new(spi_disp, DummyCs, Delay);
 
-            let buffer = unsafe { &mut MII_BUFFER };
+            let buffer = MII_BUFFER.init([0; 4096]);
             let di = SpiInterface::new(spi_dev, dc, buffer);
 
             let mut disp = mipidsi::Builder::new(mipidsi::models::ILI9488Rgb666, di)

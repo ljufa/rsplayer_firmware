@@ -27,6 +27,10 @@ cargo build
 cargo run || true
 probe-rs attach --chip RP2040 ${CARGO_TARGET_DIR}/thumbv6m-none-eabi/debug/rsplayer_firmware
 '''
+[tasks.attach-debug]
+script = '''
+probe-rs attach --chip RP2040 ${CARGO_TARGET_DIR}/thumbv6m-none-eabi/debug/rsplayer_firmware
+'''
 
 [tasks.build-release]
 description = "Build the firmware in release mode"

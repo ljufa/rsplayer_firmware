@@ -152,10 +152,13 @@ enum Command {
     QueryCurrentVolume,
     ToggleRandomPlay,
     ToggleDisplayMode,
+    /// USB host (re)connected — report power state and volume so the host
+    /// can resynchronize after a restart of either side.
+    UsbConnected,
 }
 
 static CMD_CHANNEL: Channel<CriticalSectionRawMutex, Command, 64> = Channel::new();
-static mut CORE1_STACK: Stack<8096> = Stack::new();
+static mut CORE1_STACK: Stack<8192> = Stack::new();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 static POWER_ON: AtomicBool = AtomicBool::new(false);
@@ -294,7 +297,11 @@ pub async fn tick_display() {
                 disp.tick().await;
             }
         }
-        Timer::after_millis(350).await;
+        // 50ms sleep AFTER the draw — the idle gap is what keeps the
+        // display mutex available to VU/command drawing. (A fixed-rate
+        // Ticker was tried 2026-07: frames longer than the period make it
+        // fire back-to-back to catch up, starving everything else.)
+        Timer::after_millis(50).await;
     }
 }
 
@@ -333,12 +340,41 @@ pub async fn process_commands(
 
     let mut current_playback_mode = PlaybackMode::Sequential;
     let mut silence_start_time: Option<Instant> = None;
+    // Volume saves are deferred: every save erases a whole 4 KB flash sector,
+    // so writing on each rotary click would wear the sector out. The value is
+    // flushed once the volume has been stable for 2s (checked on every loop
+    // pass — VU traffic or the 5s idle tick) and before power-off.
+    let mut volume_dirty_since: Option<Instant> = None;
+
+    // Input and filter are cached in RAM and updated at their change points.
+    // Reading them from flash on every command copied two 4 KB sectors per
+    // loop pass — at 20 Hz VU traffic that was constant needless work.
+    let mut input = flash.load_input();
+    let mut current_input = if input == 0 { "OPT" } else { "USB" };
+    let mut filter_val = flash.load_filter_type();
+    let mut current_filter = FilterType::from(filter_val).as_str();
+
+    // Cooldown after a power transition: one physical IR press can produce
+    // several non-repeat NEC frames (signal dropout mid-hold restarts the
+    // frame), and presses queued while the 1s power-on sequence runs would
+    // otherwise toggle the system right back.
+    let mut last_power_transition: Option<Instant> = None;
 
     loop {
         let cmd_future = CMD_CHANNEL.receive();
         let timeout_future = Timer::after_secs(5);
 
-        let cmd = match select(cmd_future, timeout_future).await {
+        let selected = select(cmd_future, timeout_future).await;
+
+        if let Some(since) = volume_dirty_since {
+            if since.elapsed().as_secs() >= 2 {
+                flash.save_volume(current_volume);
+                volume_dirty_since = None;
+                debug!("Deferred volume save flushed: {}", current_volume);
+            }
+        }
+
+        let cmd = match selected {
             Either::First(c) => c,
             Either::Second(_) => {
                 if let Some(start) = silence_start_time {
@@ -355,15 +391,10 @@ pub async fn process_commands(
         };
 
         let is_power_on = POWER_ON.load(core::sync::atomic::Ordering::SeqCst);
-        if cmd != Command::TogglePower && cmd != Command::PowerOn && !is_power_on {
+        if cmd != Command::TogglePower && cmd != Command::PowerOn && cmd != Command::UsbConnected && !is_power_on {
             info!("Power is off, ignoring command");
             continue;
         }
-        let input = flash.load_input();
-        let stored_filter = flash.load_filter_type();
-        let mut current_input = if input == 0 { "OPT" } else { "USB" };
-        let mut current_filter = FilterType::from(stored_filter).as_str();
-
         match cmd {
             Command::ToggleDisplayMode => {
                 display_mode = match display_mode {
@@ -404,6 +435,12 @@ pub async fn process_commands(
                 }
             }
             c @ (Command::TogglePower | Command::PowerOn | Command::PowerOff) => {
+                if let Some(t) = last_power_transition {
+                    if t.elapsed().as_secs() < 3 {
+                        info!("Power command within cooldown, ignoring");
+                        continue;
+                    }
+                }
                 let is_power_on = POWER_ON.load(core::sync::atomic::Ordering::SeqCst);
                 let should_turn_on = match c {
                     Command::TogglePower => !is_power_on,
@@ -412,6 +449,7 @@ pub async fn process_commands(
                     _ => unreachable!(),
                 };
                 if should_turn_on && !is_power_on {
+                    last_power_transition = Some(Instant::now());
                     pwr_psu_relay.set_high();
                     Timer::after_millis(1000).await;
 
@@ -422,7 +460,7 @@ pub async fn process_commands(
                     let stored_sound = flash.load_sound_setting();
                     let stored_volume = flash.load_volume();
                     current_volume = stored_volume;
-                    dac.initialize(stored_filter, stored_sound).await;
+                    dac.initialize(filter_val, stored_sound).await;
                     dac.set_volume(stored_volume).await;
                     debug!("Stored input: {}", input);
                     if input == 0 {
@@ -459,8 +497,13 @@ pub async fn process_commands(
                     rsplayer.send_power_state(true).await;
                     // rsplayer.send_command("QueryCurrentPlayerInfo").await;
                 } else if !should_turn_on && is_power_on {
+                    last_power_transition = Some(Instant::now());
                     POWER_ON.store(false, core::sync::atomic::Ordering::SeqCst);
                     debug!("Powering off");
+                    // Flush a pending deferred volume save before going dark.
+                    if volume_dirty_since.take().is_some() {
+                        flash.save_volume(current_volume);
+                    }
                     mute_out_relay.set_low();
 
                     if let Some(disp) = DISPLAY.lock().await.as_mut() {
@@ -477,7 +520,7 @@ pub async fn process_commands(
             Command::VolumeUp => {
                 info!("got VolumeUp");
                 let new_val = dac.volume_up().await;
-                flash.save_volume(new_val);
+                volume_dirty_since = Some(Instant::now());
                 current_volume = new_val;
                 {
                     let mut d = DISPLAY.lock().await;
@@ -493,7 +536,7 @@ pub async fn process_commands(
             Command::VolumeDown => {
                 info!("got VolumeDown");
                 let new_val = dac.volume_down().await;
-                flash.save_volume(new_val);
+                volume_dirty_since = Some(Instant::now());
                 current_volume = new_val;
                 {
                     let mut d = DISPLAY.lock().await;
@@ -509,7 +552,7 @@ pub async fn process_commands(
             Command::SetVolume(vol) => {
                 info!("Received SetVolume({})", vol);
                 dac.set_volume(vol).await;
-                flash.save_volume(vol);
+                volume_dirty_since = Some(Instant::now());
                 current_volume = vol;
                 {
                     let mut d = DISPLAY.lock().await;
@@ -534,6 +577,7 @@ pub async fn process_commands(
                     info!("Input signal relay set high");
                     i2s_signal_select.set_high();
                     flash.save_input(1);
+                    input = 1;
                     current_input = "USB";
                     amanero::REFRESH_SAMPLE_RATE.signal(());
                     let mut d_lock = DISPLAY.lock().await;
@@ -551,6 +595,7 @@ pub async fn process_commands(
                     info!("Input signal relay set low");
                     i2s_signal_select.set_low();
                     flash.save_input(0);
+                    input = 0;
                     current_input = "OPT";
                     let mut d_lock = DISPLAY.lock().await;
                     let disp = d_lock.as_mut().unwrap();
@@ -589,6 +634,7 @@ pub async fn process_commands(
                 info!("got NextDacFilterType");
                 let val = dac.next_filter().await;
                 flash.save_filter_type(val);
+                filter_val = val;
                 current_filter = FilterType::from(val).as_str();
                 if let Some(disp) = DISPLAY.lock().await.as_mut() {
                     disp.draw_header_status(current_input, current_filter);
@@ -601,8 +647,16 @@ pub async fn process_commands(
             }
 
             Command::QueryCurrentVolume => {
-                let vol = flash.load_volume();
-                rsplayer.send_current_volume(vol).await;
+                // RAM value, not flash — flash may lag behind while a
+                // deferred save is pending.
+                rsplayer.send_current_volume(current_volume).await;
+            }
+            Command::UsbConnected => {
+                info!("USB host connected, reporting state");
+                rsplayer.send_power_state(is_power_on).await;
+                if is_power_on {
+                    rsplayer.send_current_volume(current_volume).await;
+                }
             }
             Command::UpdateSampleRate(rate) => {
                 if input != 1 {

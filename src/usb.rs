@@ -20,6 +20,7 @@ pub async fn listen_usb_commands(
     loop {
         usb_rx.wait_connection().await;
         info!("Connected");
+        control.send(Command::UsbConnected).await;
         frame.clear();
         loop {
             match usb_rx.read_packet(&mut buf).await {

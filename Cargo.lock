@@ -464,7 +464,7 @@ dependencies = [
  "embedded-io-async",
  "futures-core",
  "futures-sink",
- "heapless",
+ "heapless 0.8.0",
 ]
 
 [[package]]
@@ -497,7 +497,7 @@ version = "0.3.0"
 source = "git+https://github.com/embassy-rs/embassy.git?tag=embassy-rp-v0.8.0#3e8d8fec15286eb25b8bba7d103c8fc279544551"
 dependencies = [
  "embassy-executor-timer-queue",
- "heapless",
+ "heapless 0.8.0",
 ]
 
 [[package]]
@@ -511,7 +511,7 @@ dependencies = [
  "embassy-sync",
  "embassy-usb-driver",
  "embedded-io-async",
- "heapless",
+ "heapless 0.8.0",
  "ssmarshal",
  "usbd-hid",
 ]
@@ -756,7 +756,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
 dependencies = [
  "hash32",
- "serde",
+ "stable_deref_trait",
+]
+
+[[package]]
+name = "heapless"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
+dependencies = [
+ "hash32",
+ "serde_core",
  "stable_deref_trait",
 ]
 
@@ -889,7 +899,7 @@ checksum = "790ebd28bd67addbccf41b1c0c188c26bb9f5bdcd91d4d6da9bd558e20d97a1d"
 dependencies = [
  "embedded-graphics-core",
  "embedded-hal 1.0.0",
- "heapless",
+ "heapless 0.8.0",
 ]
 
 [[package]]
@@ -1238,7 +1248,7 @@ dependencies = [
  "embedded-graphics",
  "embedded-hal 1.0.0",
  "embedded-hal-bus",
- "heapless",
+ "heapless 0.9.3",
  "infrared",
  "micromath",
  "mipidsi",
@@ -1246,22 +1256,11 @@ dependencies = [
  "panic-reset",
  "portable-atomic",
  "postcard",
- "rsplayer_wire",
  "serde",
  "st7920",
  "static_cell",
  "u8g2-fonts",
-]
-
-[[package]]
-name = "rsplayer_wire"
-version = "0.1.0"
-dependencies = [
- "defmt",
- "heapless",
- "postcard",
- "serde",
- "strum",
+ "wire",
 ]
 
 [[package]]
@@ -1561,7 +1560,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98816b1accafbb09085168b90f27e93d790b4bfa19d883466b5e53315b5f06a6"
 dependencies = [
- "heapless",
+ "heapless 0.8.0",
  "portable-atomic",
 ]
 
@@ -1661,6 +1660,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "wire"
+version = "0.1.0"
+dependencies = [
+ "defmt",
+ "heapless 0.9.3",
+ "postcard",
+ "serde",
+ "strum",
 ]
 
 [[package]]

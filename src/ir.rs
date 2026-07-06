@@ -18,19 +18,42 @@ pub async fn listen_ir_receiver(
     let mut ir_pin = Input::new(pin3, Pull::Down);
     let mut ir_recv: Receiver<Nec> = Receiver::new(1_000_000);
     let mut lastedge = Instant::now();
+    // Key-repeat state for the volume buttons: a click steps once; NEC
+    // repeat frames (~every 108ms while held) only ramp the volume after
+    // the button has been held for a while, and throttled — otherwise a
+    // normal click lands 1-2 repeats and jumps several steps.
+    let mut vol_press_start = Instant::now();
+    let mut last_vol_step = Instant::now();
     loop {
         ir_pin.wait_for_any_edge().await;
         let rising = ir_pin.is_high();
         let now = Instant::now();
         let dur = now.checked_duration_since(lastedge).unwrap();
-        if let Ok(Some(cmd)) = ir_recv.event(dur.as_micros().try_into().unwrap(), !rising) {
+        // Saturate instead of unwrap: after >71 min without IR activity the
+        // gap overflows u32 µs and the old `.unwrap()` paniced on the first
+        // press. A huge dt just resets the decoder state machine.
+        let dt: u32 = dur.as_micros().try_into().unwrap_or(u32::MAX);
+        if let Ok(Some(cmd)) = ir_recv.event(dt, !rising) {
             info!("cmd: {}, addr: {}, rep: {}", cmd.cmd, cmd.addr, cmd.repeat);
             if cmd.addr != 128 {
                 continue;
             }
             match cmd.cmd {
-                38 => control.send(Command::VolumeUp).await,
-                40 => control.send(Command::VolumeDown).await,
+                38 | 40 => {
+                    let fire = if cmd.repeat {
+                        now.duration_since(vol_press_start).as_millis() >= 400
+                            && now.duration_since(last_vol_step).as_millis() >= 120
+                    } else {
+                        vol_press_start = now;
+                        true
+                    };
+                    if fire {
+                        last_vol_step = now;
+                        control
+                            .send(if cmd.cmd == 38 { Command::VolumeUp } else { Command::VolumeDown })
+                            .await;
+                    }
+                }
                 39 => {
                     if !cmd.repeat {
                         control.send(Command::Next).await

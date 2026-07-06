@@ -32,33 +32,25 @@ pub async fn listen_rotary_encoder_button(
     let btn_pin = Input::new(pin, Pull::Up);
     let mut btn = Debouncer::new(btn_pin, Duration::from_millis(20));
     loop {
-        btn.debounce().await;
+        btn.debounce().await; // press
         let start = Instant::now();
 
-        match with_deadline(start + Duration::from_secs(1), btn.debounce()).await {
-            // Button Released < 1s
-            Ok(_) => {
-                continue;
-            }
-            // button held for > 1s
-            Err(_) => {
-                control.send(Command::TogglePlay).await;
-                info!("Button Held");
-            }
-        }
-
         match with_deadline(start + Duration::from_secs(5), btn.debounce()).await {
+            // Released before 5s: a short press (<1s) toggles play/pause;
+            // anything between 1s and 5s is treated as an aborted long press.
             Ok(_) => {
-                continue;
+                if start.elapsed() < Duration::from_secs(1) {
+                    info!("Button short press");
+                    control.send(Command::TogglePlay).await;
+                }
             }
-            // button held for > >5s
+            // Still held at 5s: toggle system power, then wait for release.
             Err(_) => {
-                info!("Button Long Held");
+                info!("Button long press");
                 control.send(Command::TogglePower).await;
+                btn.debounce().await;
             }
         }
-
-        btn.debounce().await;
     }
 }
 

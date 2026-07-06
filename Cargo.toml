@@ -44,11 +44,12 @@ embedded-graphics = "0.8.1"
 u8g2-fonts = { version = "0.6.0", features = ["embedded_graphics_textstyle"] }
 mipidsi = { version = "0.10.0", optional = true }
 st7920 = { version = "0.4.1", optional = true }
-heapless = { version = "0.8.0", features = ["serde"] }
+# keep in lockstep with the `heapless` version used by the shared wire crate
+heapless = { version = "0.9", features = ["serde"] }
 micromath = "2.1.0"
 
-# shared wire protocol with rsplayer host
-rsplayer_wire = { path = "../rsplayer/rsplayer_wire", features = ["defmt"] }
+# shared wire protocol with rsplayer host (crate `wire` in the rsplayer workspace)
+rsplayer_wire = { path = "../rsplayer/crates/wire", package = "wire", features = ["defmt"] }
 postcard = { version = "1", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }
 
